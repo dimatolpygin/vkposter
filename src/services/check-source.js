@@ -77,6 +77,8 @@ export async function checkSource(source, { kind = 'source_check' } = {}) {
     discovered: 0,
     added: 0,
     duplicates: 0,
+    topicDuplicates: 0,
+    listings: 0,
     invalid: 0,
     extracted: 0,
     extractFailed: 0,
@@ -102,6 +104,8 @@ export async function checkSource(source, { kind = 'source_check' } = {}) {
         const result = await articles.saveCandidate(source.id, candidate);
         if (result === 'added') stats.added += 1;
         else if (result === 'duplicate') stats.duplicates += 1;
+        else if (result === 'topic_duplicate') stats.topicDuplicates += 1;
+        else if (result === 'listing') stats.listings += 1;
         else stats.invalid += 1;
       }
 
@@ -117,8 +121,12 @@ export async function checkSource(source, { kind = 'source_check' } = {}) {
           if (extracted.via === 'firecrawl') stats.firecrawlCalls += 1;
           await articles.saveContent(article.id, extracted);
           stats.extracted += 1;
+          // Заголовок появился только сейчас — тема, посчитанная по slug, уточняется
+          // по нему, и материал может оказаться дублем уже известной темы.
+          const topicResult = await articles.refreshTopic(article.id);
+          if (topicResult === 'duplicate') stats.topicDuplicates += 1;
           logger.info(
-            { url: article.url, символов: extracted.text.length, через: extracted.via },
+            { url: article.url, символов: extracted.text.length, через: extracted.via, тема: topicResult },
             `Текст извлечён (${extracted.text.length} симв., ${extracted.via})`,
           );
         } catch (error) {
@@ -138,7 +146,8 @@ export async function checkSource(source, { kind = 'source_check' } = {}) {
       logger.info(
         stats,
         `Источник ${source.code} проверен: найдено ${stats.discovered}, новых ${stats.added}, ` +
-          `дублей ${stats.duplicates}, текстов извлечено ${stats.extracted}`,
+          `дублей URL ${stats.duplicates}, дублей темы ${stats.topicDuplicates}, ` +
+          `служебных страниц ${stats.listings}, текстов извлечено ${stats.extracted}`,
       );
       return { runId, ...stats, ms: Date.now() - started };
     });

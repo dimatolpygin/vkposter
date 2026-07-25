@@ -31,6 +31,8 @@ export function panelRouter() {
           (SELECT count(*) FROM sources)                   AS sources_total,
           (SELECT count(*) FROM groups WHERE is_active)    AS groups_active,
           (SELECT count(*) FROM articles)                  AS articles,
+          (SELECT count(DISTINCT topic_key) FROM articles
+            WHERE topic_key IS NOT NULL AND status <> 'duplicate') AS topics,
           (SELECT count(*) FROM posts)                     AS posts,
           (SELECT count(*) FROM publications)              AS publications,
           (SELECT count(*) FROM runs)                      AS runs
@@ -43,6 +45,7 @@ export function panelRouter() {
           ${stat(`${s.sources_active} из ${s.sources_total}`, 'Источников активно')}
           ${stat(s.groups_active, 'Групп ВК активно')}
           ${stat(s.articles, 'Материалов найдено')}
+          ${stat(s.topics, 'Уникальных тем')}
           ${stat(s.posts, 'Постов сгенерировано')}
           ${stat(s.publications, 'Публикаций')}
           ${stat(s.runs, 'Прогонов')}
@@ -81,10 +84,13 @@ export function panelRouter() {
       const list = await sources.listAll();
       const stats = await articles.statsBySource();
       const recent = await articles.listRecent(30);
+      const rejected = await articles.listRejected(20);
 
       const rows = list
         .map((item) => {
-          const st = stats.get(item.id) ?? { total: 0, with_text: 0, failed: 0, newest: null };
+          const st = stats.get(item.id) ?? {
+            total: 0, with_text: 0, failed: 0, topics: 0, topic_duplicates: 0, skipped: 0,
+          };
           return `<tr>
             <td><strong>${esc(item.title)}</strong><br><span class="hint">${esc(item.base_url)}</span></td>
             <td>${esc(discoveryText(item))}</td>
@@ -93,6 +99,9 @@ export function panelRouter() {
             <td>${st.total}${st.with_text ? ` <span class="hint">(с текстом ${st.with_text})</span>` : ''}${
               st.failed ? ` <span class="tag soon">сбоев ${st.failed}</span>` : ''
             }</td>
+            <td>${st.topics ?? 0}${
+              st.topic_duplicates ? ` <span class="hint">дублей ${st.topic_duplicates}</span>` : ''
+            }${st.skipped ? ` <span class="hint">служебных ${st.skipped}</span>` : ''}</td>
             <td class="hint">${esc(formatDate(item.last_checked_at) || 'ни разу')}</td>
             <td>${item.is_active ? '<span class="tag on">включён</span>' : '<span class="tag off">выключен</span>'}</td>
             <td style="white-space:nowrap">
@@ -104,7 +113,7 @@ export function panelRouter() {
               </form>
             </td>
           </tr>
-          <tr><td colspan="8" class="hint" style="padding-top:0">${esc(item.notes ?? '')}</td></tr>`;
+          <tr><td colspan="9" class="hint" style="padding-top:0">${esc(item.notes ?? '')}</td></tr>`;
         })
         .join('\n');
 
@@ -116,32 +125,71 @@ export function panelRouter() {
                 <td>${esc(item.title ?? '(заголовок появится при извлечении)')}
                     <br><a href="${esc(item.url)}" target="_blank" rel="noopener"
                           class="hint">${esc(item.url)}</a></td>
+                <td>${topicCell(item)}</td>
                 <td class="hint">${esc(formatDate(item.lastmod))}</td>
                 <td>${statusTag(item)}</td>
               </tr>`,
             )
             .join('\n')
-        : '<tr><td colspan="4" class="empty">Пока ничего не найдено. Нажмите «Проверить» у любого источника.</td></tr>';
+        : '<tr><td colspan="5" class="empty">Пока ничего не найдено. Нажмите «Проверить» у любого источника.</td></tr>';
+
+      const rejectedRows = rejected.length
+        ? rejected
+            .map(
+              (item) => `<tr>
+                <td class="hint">${esc(item.source_code)}</td>
+                <td><a href="${esc(item.url)}" target="_blank" rel="noopener"
+                       class="hint">${esc(item.url)}</a></td>
+                <td>${topicCell(item)}</td>
+                <td>${item.status === 'duplicate'
+                    ? '<span class="tag off">дубль темы</span>'
+                    : '<span class="tag off">пропущен</span>'}
+                    <span class="hint">${esc(item.skip_reason ?? '')}</span></td>
+              </tr>`,
+            )
+            .join('\n')
+        : '<tr><td colspan="4" class="empty">Отклонённых материалов нет.</td></tr>';
 
       const body = `
         <div class="card">
           <table>
             <thead><tr>
               <th>Источник</th><th>Откуда берём</th><th>Режим</th><th>Доступ</th>
-              <th>Материалов</th><th>Проверен</th><th>Статус</th><th></th>
+              <th>Материалов</th><th>Тем</th><th>Проверен</th><th>Статус</th><th></th>
             </tr></thead>
             <tbody>${rows}</tbody>
           </table>
-          <form method="post" action="/sources/check-all" style="margin-top:14px">
-            <button type="submit">Проверить все включённые</button>
-          </form>
+          <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">
+            <form method="post" action="/sources/check-all">
+              <button type="submit">Проверить все включённые</button>
+            </form>
+            <form method="post" action="/sources/topics/recompute">
+              <button class="ghost" type="submit">Пересчитать темы</button>
+            </form>
+          </div>
+          <p class="hint" style="margin:10px 0 0">
+            «Тем» — сколько разных проектов набралось после дедупа. Пересчёт нужен после
+            правки правил нормализации названий: заново размечает уже найденные материалы.
+          </p>
         </div>
 
         <h2>Последние найденные материалы</h2>
         <div class="card">
           <table>
-            <thead><tr><th>Источник</th><th>Материал</th><th>Дата</th><th>Состояние</th></tr></thead>
+            <thead><tr><th>Источник</th><th>Материал</th><th>Тема</th><th>Дата</th><th>Состояние</th></tr></thead>
             <tbody>${recentRows}</tbody>
+          </table>
+        </div>
+
+        <h2>Отклонённые материалы</h2>
+        <div class="card">
+          <p class="hint" style="margin:0 0 10px">
+            Дубли темы и служебные страницы. Дубль обычно старше «победителя», поэтому
+            в списке выше он не виден — причина отклонения показана здесь.
+          </p>
+          <table>
+            <thead><tr><th>Источник</th><th>Материал</th><th>Тема</th><th>Причина отклонения</th></tr></thead>
+            <tbody>${rejectedRows}</tbody>
           </table>
         </div>`;
 
@@ -170,7 +218,9 @@ export function panelRouter() {
       const result = await checkSource(source);
       const summary =
         `${source.code}: найдено ${result.discovered}, новых ${result.added}, ` +
-        `дублей ${result.duplicates}, текстов ${result.extracted}` +
+        `дублей URL ${result.duplicates}, дублей темы ${result.topicDuplicates}` +
+        (result.listings ? `, служебных страниц ${result.listings}` : '') +
+        `, текстов ${result.extracted}` +
         (result.extractFailed ? `, сбоев ${result.extractFailed}` : '') +
         `, ${Math.round(result.ms / 1000)} c`;
       res.redirect(`/sources?ok=${encodeURIComponent(summary)}`);
@@ -195,6 +245,22 @@ export function panelRouter() {
       }
     }
     res.redirect(`/sources?ok=${encodeURIComponent(parts.join('; '))}`);
+  });
+
+  // Пересчёт тем у уже найденных материалов (после правки правил нормализации)
+  router.post('/sources/topics/recompute', async (req, res) => {
+    try {
+      const stats = await articles.recomputeTopics();
+      const summary =
+        `Пересчитано ${stats.processed}: тем ${stats.keyed}, дублей темы ${stats.duplicates}, ` +
+        `служебных страниц ${stats.listings}` +
+        (stats.unkeyed ? `, без темы ${stats.unkeyed}` : '');
+      logger.info({ ...stats, кто: req.user.login }, 'Темы пересчитаны из панели');
+      res.redirect(`/sources?ok=${encodeURIComponent(summary)}`);
+    } catch (error) {
+      logger.error(errFields(error), 'Пересчёт тем упал');
+      res.redirect(`/sources?err=${encodeURIComponent(error.message)}`);
+    }
   });
 
   router.post('/sources/:id/toggle', async (req, res, next) => {
@@ -341,9 +407,24 @@ function fetchViaText(via) {
   return 'прямой запрос';
 }
 
+/** Тема материала: ключ дедупа и то, откуда он получен (подсказка/заголовок/адрес). */
+function topicCell(item) {
+  if (!item.topic_key) return '<span class="hint">—</span>';
+  const via = { hint: 'из подсказки', title: 'из заголовка', slug: 'из адреса' }[item.topic_via];
+  return `<code>${esc(item.topic_key)}</code><br><span class="hint">${esc(via ?? '')}</span>`;
+}
+
 function statusTag(item) {
   if (item.status === 'failed') {
     return `<span class="tag soon">сбой</span> <span class="hint">${esc(item.skip_reason ?? '')}</span>`;
+  }
+  // Отклонённый материал показывает причину: дубль темы (с номером «победителя»)
+  // или служебная страница-листинг.
+  if (item.status === 'duplicate') {
+    return `<span class="tag off">отклонён</span> <span class="hint">${esc(item.skip_reason ?? 'дубль темы')}</span>`;
+  }
+  if (item.status === 'skipped') {
+    return `<span class="tag off">пропущен</span> <span class="hint">${esc(item.skip_reason ?? '')}</span>`;
   }
   if (item.content_mode === 'topic_only') {
     return '<span class="tag on">тема готова</span> <span class="hint">текст не нужен</span>';
