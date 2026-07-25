@@ -108,10 +108,12 @@ export function validatePost(text, { minChars, maxChars, adLink, topicName }) {
   if (value.length < minChars) problems.push(`коротко: ${value.length} символов, нужно от ${minChars}`);
   if (value.length > maxChars) problems.push(`длинно: ${value.length} символов, нужно до ${maxChars}`);
 
-  // Первый абзац — то, что до первой пустой строки, но без строки заголовка:
-  // заголовок в формате клиента идёт отдельным блоком сверху.
+  // «Первый абзац» — первые два блока до пустой строки. Два, а не один: заголовок
+  // приходит отдельным полем схемы, но модель нередко дублирует его первой строкой тела,
+  // и тогда зачин со словом «отзыв» оказывается во втором блоке. Проверка по одному
+  // блоку отбраковывала нормальные посты (поймано на первом живом прогоне).
   const blocks = value.split(/\n\s*\n/).map((block) => block.trim()).filter(Boolean);
-  const firstParagraph = (blocks[1] ?? blocks[0] ?? '').toLowerCase();
+  const firstParagraph = blocks.slice(0, 2).join('\n').toLowerCase();
 
   if (!/отзыв/.test(firstParagraph)) {
     problems.push('в первом абзаце нет слова «отзыв»');
