@@ -1,0 +1,150 @@
+import { discoverSource } from '../sources/discovery.js';
+import { fetchArticleViaWpApi } from '../sources/wp-api.js';
+import * as firecrawl from '../lib/firecrawl.js';
+import * as articles from '../repo/articles.js';
+import * as runs from '../repo/runs.js';
+import * as settings from '../repo/settings.js';
+import { query } from '../db/pool.js';
+import { log, errFields } from '../logger.js';
+import { getRequestId, extendContext } from '../context.js';
+
+const logger = log('проверка');
+
+/** Блокировка на источник: параллельные проверки одного сайта не должны пересекаться. */
+const LOCK_NAMESPACE = 771;
+
+async function withSourceLock(sourceId, fn) {
+  const { rows } = await query('SELECT pg_try_advisory_lock($1, $2) AS locked', [
+    LOCK_NAMESPACE,
+    sourceId,
+  ]);
+  if (!rows[0].locked) {
+    throw new Error('Проверка этого источника уже идёт — дождитесь её завершения');
+  }
+  try {
+    return await fn();
+  } finally {
+    await query('SELECT pg_advisory_unlock($1, $2)', [LOCK_NAMESPACE, sourceId]).catch(() => {});
+  }
+}
+
+/** Дата отсечки: настраиваемое окно свежести. */
+export async function freshnessCutoff() {
+  const days = await settings.getInt('freshness_window_days', 30);
+  return new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+}
+
+/**
+ * Извлечение текста одного материала.
+ * Порядок попыток осознанный: сначала WP REST API (бесплатно и полный текст),
+ * firecrawl — только как страховка, потому что у него 1000 запросов в месяц на проект.
+ */
+async function extractOne(source, article) {
+  if (source.fetch_via === 'wp_api') {
+    try {
+      const result = await fetchArticleViaWpApi(source, article.url);
+      if (result?.text && result.text.length > 200) {
+        return { ...result, via: 'wp_api' };
+      }
+      logger.warn(
+        { url: article.url, символов: result?.text?.length ?? 0 },
+        'WP API отдал слишком мало текста — уходим на firecrawl',
+      );
+    } catch (error) {
+      logger.warn({ url: article.url, ...errFields(error) }, 'WP API не сработал — уходим на firecrawl');
+    }
+  }
+
+  if (!firecrawl.isConfigured()) {
+    throw new Error('Текст не извлечён: WP API не дал результата, а FIRECRAWL_API_KEY не задан');
+  }
+  const { markdown, title } = await firecrawl.scrape(article.url);
+  return { title: title ?? article.title, text: markdown, via: 'firecrawl' };
+}
+
+/**
+ * Полная проверка одного источника: обнаружение → сохранение → извлечение текста.
+ * Пишет запись в runs, чтобы прогон был виден в панели и связан с логами по request-id.
+ */
+export async function checkSource(source, { kind = 'source_check' } = {}) {
+  const requestId = getRequestId() ?? 'no-rid';
+  const runId = await runs.startRun({ requestId, kind, meta: { source: source.code } });
+  extendContext({ runId });
+
+  const started = Date.now();
+  const stats = {
+    source: source.code,
+    discovered: 0,
+    added: 0,
+    duplicates: 0,
+    invalid: 0,
+    extracted: 0,
+    extractFailed: 0,
+    topicOnlyReady: 0,
+    firecrawlCalls: 0,
+  };
+
+  try {
+    return await withSourceLock(source.id, async () => {
+      const since = await freshnessCutoff();
+      const discoveryLimit = await settings.getInt('discovery_limit_per_source', 50);
+      const extractLimit = await settings.getInt('extract_limit_per_check', 10);
+
+      logger.info(
+        { источник: source.code, окно_с: since.toISOString().slice(0, 10), лимит: discoveryLimit },
+        `Проверяем источник ${source.code}, окно свежести с ${since.toISOString().slice(0, 10)}`,
+      );
+
+      const candidates = await discoverSource(source, { since, limit: discoveryLimit });
+      stats.discovered = candidates.length;
+
+      for (const candidate of candidates) {
+        const result = await articles.saveCandidate(source.id, candidate);
+        if (result === 'added') stats.added += 1;
+        else if (result === 'duplicate') stats.duplicates += 1;
+        else stats.invalid += 1;
+      }
+
+      // Режим «только тема»: текст не нужен, материал сразу готов к генерации
+      stats.topicOnlyReady = await articles.markTopicOnlyReady(source.id);
+
+      // Извлечение текста — только для новых материалов. Уже извлечённые в выборку
+      // не попадают, поэтому повторная проверка не расходует лимит заново.
+      const pending = await articles.listPendingExtraction(source.id, extractLimit);
+      for (const article of pending) {
+        try {
+          const extracted = await extractOne(source, article);
+          if (extracted.via === 'firecrawl') stats.firecrawlCalls += 1;
+          await articles.saveContent(article.id, extracted);
+          stats.extracted += 1;
+          logger.info(
+            { url: article.url, символов: extracted.text.length, через: extracted.via },
+            `Текст извлечён (${extracted.text.length} симв., ${extracted.via})`,
+          );
+        } catch (error) {
+          stats.extractFailed += 1;
+          await articles.markFailed(article.id, error.message);
+          logger.error({ url: article.url, ...errFields(error) }, 'Извлечение текста упало');
+        }
+      }
+
+      await query('UPDATE sources SET last_checked_at = now() WHERE id = $1', [source.id]);
+      await runs.finishRun(runId, {
+        status: 'done',
+        found: stats.added,
+        meta: { ...stats, ms: Date.now() - started },
+      });
+
+      logger.info(
+        stats,
+        `Источник ${source.code} проверен: найдено ${stats.discovered}, новых ${stats.added}, ` +
+          `дублей ${stats.duplicates}, текстов извлечено ${stats.extracted}`,
+      );
+      return { runId, ...stats, ms: Date.now() - started };
+    });
+  } catch (error) {
+    await runs.finishRun(runId, { status: 'failed', error: error.message, meta: stats });
+    logger.error({ источник: source.code, ...errFields(error) }, `Проверка источника ${source.code} упала`);
+    throw error;
+  }
+}

@@ -4,7 +4,9 @@ import { page, esc } from '../views/layout.js';
 import { query } from '../../db/pool.js';
 import * as sources from '../../repo/sources.js';
 import * as settings from '../../repo/settings.js';
-import { log } from '../../logger.js';
+import * as articles from '../../repo/articles.js';
+import { checkSource } from '../../services/check-source.js';
+import { log, errFields } from '../../logger.js';
 
 const logger = log('панель');
 
@@ -77,36 +79,71 @@ export function panelRouter() {
   router.get('/sources', async (req, res, next) => {
     try {
       const list = await sources.listAll();
+      const stats = await articles.statsBySource();
+      const recent = await articles.listRecent(30);
+
       const rows = list
-        .map(
-          (item) => `<tr>
+        .map((item) => {
+          const st = stats.get(item.id) ?? { total: 0, with_text: 0, failed: 0, newest: null };
+          return `<tr>
             <td><strong>${esc(item.title)}</strong><br><span class="hint">${esc(item.base_url)}</span></td>
             <td>${esc(discoveryText(item))}</td>
             <td>${esc(item.content_mode === 'text' ? 'рерайт статьи' : 'только тема')}</td>
-            <td>${esc(item.fetch_via)}</td>
+            <td>${esc(fetchViaText(item.fetch_via))}</td>
+            <td>${st.total}${st.with_text ? ` <span class="hint">(с текстом ${st.with_text})</span>` : ''}${
+              st.failed ? ` <span class="tag soon">сбоев ${st.failed}</span>` : ''
+            }</td>
+            <td class="hint">${esc(formatDate(item.last_checked_at) || 'ни разу')}</td>
             <td>${item.is_active ? '<span class="tag on">включён</span>' : '<span class="tag off">выключен</span>'}</td>
-            <td>
+            <td style="white-space:nowrap">
+              <form class="inline" method="post" action="/sources/${item.id}/check">
+                <button class="small" type="submit"${item.is_active ? '' : ' disabled'}>Проверить</button>
+              </form>
               <form class="inline" method="post" action="/sources/${item.id}/toggle">
                 <button class="ghost small" type="submit">${item.is_active ? 'Выключить' : 'Включить'}</button>
               </form>
             </td>
           </tr>
-          <tr><td colspan="6" class="hint" style="padding-top:0">${esc(item.notes ?? '')}</td></tr>`,
-        )
+          <tr><td colspan="8" class="hint" style="padding-top:0">${esc(item.notes ?? '')}</td></tr>`;
+        })
         .join('\n');
+
+      const recentRows = recent.length
+        ? recent
+            .map(
+              (item) => `<tr>
+                <td class="hint">${esc(item.source_code)}</td>
+                <td>${esc(item.title ?? '(заголовок появится при извлечении)')}
+                    <br><a href="${esc(item.url)}" target="_blank" rel="noopener"
+                          class="hint">${esc(item.url)}</a></td>
+                <td class="hint">${esc(formatDate(item.lastmod))}</td>
+                <td>${statusTag(item)}</td>
+              </tr>`,
+            )
+            .join('\n')
+        : '<tr><td colspan="4" class="empty">Пока ничего не найдено. Нажмите «Проверить» у любого источника.</td></tr>';
 
       const body = `
         <div class="card">
           <table>
             <thead><tr>
               <th>Источник</th><th>Откуда берём</th><th>Режим</th><th>Доступ</th>
-              <th>Статус</th><th></th>
+              <th>Материалов</th><th>Проверен</th><th>Статус</th><th></th>
             </tr></thead>
             <tbody>${rows}</tbody>
           </table>
+          <form method="post" action="/sources/check-all" style="margin-top:14px">
+            <button type="submit">Проверить все включённые</button>
+          </form>
         </div>
-        <h2>Проверка источников</h2>
-        ${soon(2, 'Кнопка «Проверить сейчас» и вычитка свежих материалов через sitemap и firecrawl.')}`;
+
+        <h2>Последние найденные материалы</h2>
+        <div class="card">
+          <table>
+            <thead><tr><th>Источник</th><th>Материал</th><th>Дата</th><th>Состояние</th></tr></thead>
+            <tbody>${recentRows}</tbody>
+          </table>
+        </div>`;
 
       res.type('html').send(
         page({
@@ -115,13 +152,49 @@ export function panelRouter() {
           user: req.user,
           heading: 'Источники',
           sub: 'Раздел для исполнителя: новые сайты подключаются с индивидуальной настройкой парсинга.',
-          message: req.query.ok ? { kind: 'ok', text: 'Источник обновлён' } : null,
+          message: buildSourceMessage(req.query),
           body,
         }),
       );
     } catch (error) {
       next(error);
     }
+  });
+
+  // Проверка одного источника
+  router.post('/sources/:id/check', async (req, res, next) => {
+    try {
+      const source = await sources.findById(Number.parseInt(req.params.id, 10));
+      if (!source) return res.status(404).json({ error: 'Источник не найден' });
+
+      const result = await checkSource(source);
+      const summary =
+        `${source.code}: найдено ${result.discovered}, новых ${result.added}, ` +
+        `дублей ${result.duplicates}, текстов ${result.extracted}` +
+        (result.extractFailed ? `, сбоев ${result.extractFailed}` : '') +
+        `, ${Math.round(result.ms / 1000)} c`;
+      res.redirect(`/sources?ok=${encodeURIComponent(summary)}`);
+    } catch (error) {
+      logger.error(errFields(error), 'Проверка источника из панели упала');
+      res.redirect(`/sources?err=${encodeURIComponent(error.message)}`);
+      return undefined;
+    }
+  });
+
+  // Проверка всех включённых источников
+  router.post('/sources/check-all', async (req, res) => {
+    const active = await sources.listActive();
+    const parts = [];
+    for (const source of active) {
+      try {
+        const result = await checkSource(source);
+        parts.push(`${source.code}: +${result.added} (текстов ${result.extracted})`);
+      } catch (error) {
+        parts.push(`${source.code}: ошибка — ${error.message}`);
+        logger.error({ источник: source.code, ...errFields(error) }, 'Проверка источника упала');
+      }
+    }
+    res.redirect(`/sources?ok=${encodeURIComponent(parts.join('; '))}`);
   });
 
   router.post('/sources/:id/toggle', async (req, res, next) => {
@@ -260,6 +333,31 @@ function publishModeTag(mode) {
 function discoveryText(item) {
   if (item.discovery === 'sitemap') return `sitemap: ${item.sitemap_pattern}`;
   return 'свой адаптер';
+}
+
+function fetchViaText(via) {
+  if (via === 'wp_api') return 'WP REST API';
+  if (via === 'firecrawl') return 'firecrawl';
+  return 'прямой запрос';
+}
+
+function statusTag(item) {
+  if (item.status === 'failed') {
+    return `<span class="tag soon">сбой</span> <span class="hint">${esc(item.skip_reason ?? '')}</span>`;
+  }
+  if (item.content_mode === 'topic_only') {
+    return '<span class="tag on">тема готова</span> <span class="hint">текст не нужен</span>';
+  }
+  if (item.has_text) {
+    return `<span class="tag on">текст есть</span> <span class="hint">${item.text_len} симв.</span>`;
+  }
+  return '<span class="tag off">ждёт извлечения</span>';
+}
+
+function buildSourceMessage(q) {
+  if (q.err) return { kind: 'err', text: String(q.err) };
+  if (q.ok) return { kind: 'ok', text: String(q.ok) };
+  return null;
 }
 
 function formatDate(value) {

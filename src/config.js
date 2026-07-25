@@ -1,8 +1,14 @@
 import 'dotenv/config';
 
-/** Читает переменную окружения, падает на старте, если обязательная не задана. */
+/**
+ * Читает переменную окружения, падает на старте, если обязательная не задана.
+ *
+ * trim обязателен: .env, отредактированный на Windows, приходит с CRLF, и значение
+ * получает хвостовой \r. Пароль с невидимым \r перестаёт совпадать, а API-ключ даёт
+ * загадочный 401 от провайдера — искать такое потом крайне неприятно.
+ */
 function env(name, { required = false, fallback = undefined } = {}) {
-  const raw = process.env[name];
+  const raw = process.env[name]?.trim();
   if (raw === undefined || raw === '') {
     if (required) {
       throw new Error(`Не задана обязательная переменная окружения ${name} (см. .env.example)`);
@@ -58,6 +64,18 @@ export const config = {
   session: {
     secret: env('SESSION_SECRET', { required: true }),
   },
+
+  firecrawl: {
+    apiKey: env('FIRECRAWL_API_KEY'),
+    baseUrl: env('FIRECRAWL_BASE_URL', { fallback: 'https://api.firecrawl.dev/v2' }),
+    timeoutMs: envInt('FIRECRAWL_TIMEOUT_MS', 90_000),
+  },
+
+  // Общий User-Agent для прямых запросов к источникам: часть сайтов режет пустой UA.
+  userAgent: env(
+    'HTTP_USER_AGENT',
+    { fallback: 'Mozilla/5.0 (compatible; vkposter/1.0; +https://probizn.website)' },
+  ),
 
   // Первичная установка аккаунта панели. Дальше пароль живёт в БД и меняется в панели.
   admin: {
