@@ -87,6 +87,18 @@ async function call(method, path, { json, retries = 2 } = {}) {
   }
 
   const parsed = typeof body === 'string' ? safeJson(body) : body;
+  return unwrap(parsed);
+}
+
+/**
+ * Живой API отдаёт не то, что обещает справочник: `/accounts` приходит как
+ * `{"data": [...], "pages": {...}}`, а не голым массивом. Поддерживаем оба варианта —
+ * иначе «нет ни одной группы ВК» вместо трёх подключённых.
+ */
+function unwrap(parsed) {
+  if (parsed && !Array.isArray(parsed) && typeof parsed === 'object' && 'data' in parsed) {
+    return parsed.data;
+  }
   return parsed;
 }
 
@@ -182,9 +194,13 @@ export async function createPublication({
   type = 1,
 }) {
   if (!accountId) throw new PmpError('Не задан accountId для публикации');
+  // Number(): id аккаунта и file_id приходят из БД (bigint → строка в node-pg), а API
+  // валидирует тип строго — «Value expected to be 'integer', but 'string' given».
+  const account = Number(accountId);
+  const files = fileIds.map(Number).filter((value) => !Number.isNaN(value));
 
   const detail = { publication_type: type };
-  if (fileIds.length) detail.file_ids = fileIds;
+  if (files.length) detail.file_ids = files;
   if (content) detail.content = content;
   if (title) detail.title = title;
 
@@ -194,7 +210,7 @@ export async function createPublication({
     json: {
       project_id: projectId(),
       post_at: postAt,
-      account_ids: [accountId],
+      account_ids: [account],
       publication_status: status,
       details: [detail],
     },
@@ -206,7 +222,7 @@ export async function createPublication({
     throw new PmpError(`publications не вернул id: ${JSON.stringify(response).slice(0, 300)}`);
   }
   logger.info(
-    { публикация: id, аккаунт: accountId, статус: response.publication_status ?? status, post_at: postAt },
+    { публикация: id, аккаунт: account, статус: response.publication_status ?? status, post_at: postAt },
     `postmypost: публикация ${id} создана (${status === STATUS_DRAFT ? 'черновик' : 'в очередь'})`,
   );
   return {
