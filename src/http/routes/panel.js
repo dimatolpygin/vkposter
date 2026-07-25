@@ -39,7 +39,8 @@ export function panelRouter() {
         SELECT
           (SELECT count(*) FROM sources WHERE is_active)   AS sources_active,
           (SELECT count(*) FROM sources)                   AS sources_total,
-          (SELECT count(*) FROM groups WHERE is_active)    AS groups_active,
+          (SELECT count(*) FROM groups
+            WHERE is_active AND deleted_at IS NULL)        AS groups_active,
           (SELECT count(*) FROM articles)                  AS articles,
           (SELECT count(DISTINCT topic_key) FROM articles
             WHERE topic_key IS NOT NULL AND status <> 'duplicate') AS topics,
@@ -570,15 +571,17 @@ export function panelRouter() {
     }
   });
 
-  // Синхронизация групп ВК из postmypost. Полноценный раздел «Группы» — этап 7.
+  // Синхронизация групп ВК из postmypost. Кнопка есть и в разделе «Группы»,
+  // и в форме публикации — поле back говорит, куда вернуться.
   router.post('/groups/sync', async (req, res) => {
     const back = typeof req.body.back === 'string' && req.body.back.startsWith('/')
       ? req.body.back
-      : '/posts';
+      : '/groups';
     try {
       const result = await syncGroups();
       const summary = `Групп ВК из postmypost: ${result.total} (новых ${result.added}` +
-        (result.broken ? `, отвалившихся ${result.broken}` : '') + ')';
+        (result.broken ? `, отвалившихся ${result.broken}` : '') +
+        (result.hidden ? `, скрытых ${result.hidden}` : '') + ')';
       res.redirect(`${back}?ok=${encodeURIComponent(summary)}`);
     } catch (error) {
       logger.error(errFields(error), 'Синхронизация групп из панели упала');
@@ -630,7 +633,9 @@ export function panelRouter() {
       if (!row) throw new Error(`Публикации #${id} нет`);
       if (!row.pmp_publication_id) throw new Error('У записи нет id публикации в postmypost');
 
-      const group = await groups.findById(row.group_id);
+      // findAnyById: группа могла быть убрана из списка, но её публикацию всё равно
+      // нужно уметь удалить в postmypost.
+      const group = await groups.findAnyById(row.group_id);
       await pmp.deletePublication(row.pmp_publication_id, [group.pmp_account_id]);
       await publications.remove(row.id);
       // Пост держит статус «опубликован», пока у него есть хоть одна живая публикация.
@@ -732,9 +737,221 @@ export function panelRouter() {
     }
   });
 
+  // ── Группы ВК ────────────────────────────────────────────────────────────
+  router.get('/groups', async (req, res, next) => {
+    try {
+      const list = await groups.listAll();
+      const removed = await groups.listDeleted();
+      const totals = await groups.countAll();
+      const defaultPerDay = await settings.getInt('default_posts_per_day', 10);
+
+      // Остаток на сегодня по каждой включённой группе — это и есть план следующего
+      // прогона: столько постов группа ещё примет с учётом «постов в день».
+      const planned = list
+        .filter((group) => group.is_active)
+        .reduce((sum, group) => sum + Math.max(0, group.posts_per_day - group.published_today), 0);
+
+      const rows = list.length
+        ? list
+            .map((group) => {
+              const broken = group.connection_status !== null
+                && Number(group.connection_status) !== pmp.CONNECTION_OK;
+              const left = Math.max(0, group.posts_per_day - group.published_today);
+              return `<tr>
+                <td><strong>${esc(group.name)}</strong><br>
+                    <span class="hint">${esc(group.login ?? '')} · аккаунт
+                    ${group.pmp_account_id}${
+                      group.external_id ? ` · ВК ${esc(group.external_id)}` : ''
+                    }</span></td>
+                <td>
+                  <form class="inline" method="post" action="/groups/${group.id}/posts-per-day">
+                    <input type="number" name="posts_per_day" min="0" max="100"
+                           value="${group.posts_per_day}" style="width:70px">
+                    <button class="ghost small" type="submit">Сохранить</button>
+                  </form>
+                </td>
+                <td>${group.published_today} из ${group.posts_per_day}
+                    <br><span class="hint">${
+                      group.is_active
+                        ? (left ? `примет ещё ${left}` : 'лимит на сегодня исчерпан')
+                        : 'группа выключена'
+                    }</span></td>
+                <td>${group.publications}</td>
+                <td>${connectionTag(group)}<br>
+                    <span class="hint">${esc(formatDate(group.synced_at) || 'не синхронизирована')}</span></td>
+                <td>${group.is_active
+                    ? '<span class="tag on">включена</span>'
+                    : '<span class="tag off">выключена</span>'}</td>
+                <td style="white-space:nowrap">
+                  <form class="inline" method="post" action="/groups/${group.id}/toggle">
+                    <button class="ghost small" type="submit"${broken && !group.is_active ? ' disabled' : ''}>${
+                      group.is_active ? 'Выключить' : 'Включить'
+                    }</button>
+                  </form>
+                  <form class="inline" method="post" action="/groups/${group.id}/delete">
+                    <button class="ghost small" type="submit">Убрать из списка</button>
+                  </form>
+                </td>
+              </tr>`;
+            })
+            .join('\n')
+        : `<tr><td colspan="7" class="empty">Групп нет. Подключите группу ВК в postmypost
+             и нажмите «Обновить список из postmypost».</td></tr>`;
+
+      const removedBlock = removed.length
+        ? `<h2>Убранные из списка</h2>
+           <div class="card">
+             <p class="hint" style="margin:0 0 10px">
+               Группа скрыта, но не удалена: история публикаций по ней цела и видна
+               в карточках постов. Обновление списка из postmypost скрытую группу
+               обратно не возвращает — только кнопка ниже.
+             </p>
+             <table>
+               <thead><tr><th>Группа</th><th>Публикаций</th><th>Убрана</th><th></th></tr></thead>
+               <tbody>${removed
+                 .map(
+                   (group) => `<tr>
+                     <td>${esc(group.name)}<br><span class="hint">аккаунт ${group.pmp_account_id}</span></td>
+                     <td>${group.publications}</td>
+                     <td class="hint">${esc(formatDate(group.deleted_at))}</td>
+                     <td><form class="inline" method="post" action="/groups/${group.id}/restore">
+                           <button class="ghost small" type="submit">Вернуть в список</button>
+                         </form></td>
+                   </tr>`,
+                 )
+                 .join('\n')}</tbody>
+             </table>
+           </div>`
+        : '';
+
+      const body = `
+        <div class="grid">
+          ${stat(`${totals.active} из ${totals.total}`, 'Групп включено')}
+          ${stat(planned, 'Постов примут сегодня')}
+          ${stat(totals.deleted, 'Убрано из списка')}
+          ${stat(defaultPerDay, 'Постов в день по умолчанию')}
+        </div>
+        <div class="card">
+          <table>
+            <thead><tr>
+              <th>Группа</th><th>Постов в день</th><th>Сегодня</th><th>Публикаций</th>
+              <th>Подключение</th><th>Статус</th><th></th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+          <div style="margin-top:14px">
+            <form method="post" action="/groups/sync">
+              <input type="hidden" name="back" value="/groups">
+              <button type="submit">Обновить список из postmypost</button>
+            </form>
+          </div>
+          <p class="hint" style="margin:10px 0 0">
+            Группы берутся из проекта postmypost (только ВК), числовые id вручную вводить
+            не нужно: подключили группу там - нажали кнопку здесь. «Постов в день»
+            ограничивает публикации в группу за сутки по МСК; выключенная группа посты
+            не получает.
+          </p>
+        </div>
+        ${removedBlock}`;
+
+      res.type('html').send(
+        page({
+          title: 'Группы ВК',
+          active: '/groups',
+          user: req.user,
+          heading: 'Группы ВК',
+          sub: 'Список приходит из postmypost. Клиент включает нужные группы и задаёт объём постинга.',
+          message: buildSourceMessage(req.query),
+          body,
+        }),
+      );
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.post('/groups/:id/toggle', async (req, res) => {
+    const id = Number.parseInt(req.params.id, 10);
+    try {
+      const group = await groups.findById(id);
+      if (!group) throw new Error(`Группы #${id} нет`);
+      await groups.setActive(group.id, !group.is_active);
+      logger.info(
+        { группа: group.name, включена: !group.is_active, кто: req.user.login },
+        `Группа «${group.name}» ${!group.is_active ? 'включена' : 'выключена'}`,
+      );
+      res.redirect(
+        `/groups?ok=${encodeURIComponent(
+          `Группа «${group.name}» ${!group.is_active ? 'включена' : 'выключена'}`,
+        )}`,
+      );
+    } catch (error) {
+      logger.error({ группа: id, ...errFields(error) }, 'Переключение группы упало');
+      res.redirect(`/groups?err=${encodeURIComponent(error.message)}`);
+    }
+  });
+
+  router.post('/groups/:id/posts-per-day', async (req, res) => {
+    const id = Number.parseInt(req.params.id, 10);
+    try {
+      const group = await groups.setPostsPerDay(id, req.body.posts_per_day);
+      logger.info(
+        { группа: group.name, постов_в_день: group.posts_per_day, кто: req.user.login },
+        `Группа «${group.name}»: постов в день теперь ${group.posts_per_day}`,
+      );
+      res.redirect(
+        `/groups?ok=${encodeURIComponent(
+          `Группа «${group.name}»: постов в день ${group.posts_per_day}`,
+        )}`,
+      );
+    } catch (error) {
+      logger.error({ группа: id, ...errFields(error) }, 'Смена «постов в день» упала');
+      res.redirect(`/groups?err=${encodeURIComponent(error.message)}`);
+    }
+  });
+
+  // Удаление мягкое: история публикаций по группе должна остаться читаемой,
+  // а физический DELETE её уносит (и с этапа 7 запрещён на уровне схемы).
+  router.post('/groups/:id/delete', async (req, res) => {
+    const id = Number.parseInt(req.params.id, 10);
+    try {
+      const group = await groups.softDelete(id);
+      if (!group) throw new Error(`Группы #${id} нет или она уже убрана`);
+      logger.warn(
+        { группа: group.name, кто: req.user.login },
+        `Группа «${group.name}» убрана из списка (история публикаций сохранена)`,
+      );
+      res.redirect(
+        `/groups?ok=${encodeURIComponent(
+          `Группа «${group.name}» убрана из списка. История публикаций сохранена, ` +
+            'группу можно вернуть.',
+        )}`,
+      );
+    } catch (error) {
+      logger.error({ группа: id, ...errFields(error) }, 'Удаление группы упало');
+      res.redirect(`/groups?err=${encodeURIComponent(error.message)}`);
+    }
+  });
+
+  router.post('/groups/:id/restore', async (req, res) => {
+    const id = Number.parseInt(req.params.id, 10);
+    try {
+      const group = await groups.restore(id);
+      if (!group) throw new Error(`Группы #${id} нет среди убранных`);
+      logger.info({ группа: group.name, кто: req.user.login }, `Группа «${group.name}» возвращена в список`);
+      res.redirect(
+        `/groups?ok=${encodeURIComponent(
+          `Группа «${group.name}» возвращена в список выключенной — включите её, когда нужно`,
+        )}`,
+      );
+    } catch (error) {
+      logger.error({ группа: id, ...errFields(error) }, 'Восстановление группы упало');
+      res.redirect(`/groups?err=${encodeURIComponent(error.message)}`);
+    }
+  });
+
   // ── Разделы будущих этапов ───────────────────────────────────────────────
   const stubs = [
-    ['/groups', 'Группы ВК', 7, 'Список групп подтягивается из postmypost, клиент включает нужные и задаёт число постов в день.'],
     ['/manual', 'Ручной режим', 9, 'Вставить ссылку или тему — система сделает пост в выбранную группу.'],
     ['/runs', 'Прогоны', 11, 'История запусков: найдено, сгенерировано, опубликовано, ошибки, request-id.'],
     ['/published', 'Опубликовано', 11, 'Лог постов: группа, тема, время, ссылка на пост в ВК, обложка.'],
@@ -772,8 +989,11 @@ export function panelRouter() {
   }
 
   /**
-   * Форма публикации: выбор групп + кнопка. Группы синхронизируются из postmypost
-   * (раздел «Группы» с настройками появится на этапе 7, здесь — минимум для публикации).
+   * Форма публикации: выбор групп + кнопка.
+   *
+   * Выключенная группа в выборе есть, но недоступна: так видно, почему пост в неё
+   * не уйдёт, и сразу понятно, где это менять (раздел «Группы»). Дневной лимит
+   * показывается рядом — публикация сверх него отказывает на уровне сервиса.
    */
   async function publishForm(post) {
     const list = await groups.listAll();
@@ -794,13 +1014,21 @@ export function panelRouter() {
       .map((group) => {
         const broken = group.connection_status !== null
           && Number(group.connection_status) !== pmp.CONNECTION_OK;
+        const left = Math.max(0, group.posts_per_day - group.published_today);
+        const blocked = broken || !group.is_active;
+        const notes = [
+          esc(group.login ?? ''),
+          `аккаунт ${group.pmp_account_id}`,
+          `сегодня ${group.published_today} из ${group.posts_per_day}`,
+        ];
+        if (!group.is_active) notes.push('<span class="tag off">выключена</span>');
+        if (broken) notes.push('<span class="tag off">отключён</span>');
+        if (group.is_active && !broken && left === 0) notes.push('лимит на сегодня исчерпан');
         return `<label style="display:block;margin-bottom:6px">
             <input type="checkbox" name="group_ids" value="${group.id}"
-              ${broken ? '' : 'checked'}>
+              ${blocked ? 'disabled' : 'checked'}>
             ${esc(group.name)}
-            <span class="hint">${esc(group.login ?? '')} · аккаунт ${group.pmp_account_id}${
-              broken ? ' · <span class="tag off">отключён</span>' : ''
-            }</span>
+            <span class="hint">${notes.filter(Boolean).join(' · ')}</span>
           </label>`;
       })
       .join('\n');
@@ -814,7 +1042,8 @@ export function panelRouter() {
       </form>
       <p class="hint" style="margin:10px 0 0">
         Картинка заливается в postmypost один раз и переиспользуется всеми выбранными
-        группами. Режим переключается в разделе «Настройки». ${syncButton}</p>`;
+        группами. Режим переключается в разделе «Настройки», состав групп и объём
+        постинга - в разделе «Группы». ${syncButton}</p>`;
   }
 
   /** Карточка промта: правка, история версий, откат. */
@@ -905,6 +1134,19 @@ function scheduleText(map) {
   return map.schedule_mode === 'interval'
     ? `каждые ${map.schedule_interval_hours} ч`
     : `ежедневно в ${map.schedule_daily_at} МСК`;
+}
+
+/**
+ * Состояние подключения аккаунта в postmypost. У ВК токен истекает (по брифу — раз
+ * в три месяца), и клиент должен видеть это в списке, а не узнавать из сбоя постинга.
+ */
+function connectionTag(group) {
+  if (group.connection_status === null) return '<span class="hint">неизвестно</span>';
+  if (Number(group.connection_status) === pmp.CONNECTION_OK) {
+    return '<span class="tag on">подключена</span>';
+  }
+  return `<span class="tag off">отвалилась</span>
+    <span class="hint">статус ${esc(group.connection_status)} — переподключите в postmypost</span>`;
 }
 
 function publishModeTag(mode) {

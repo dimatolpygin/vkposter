@@ -84,6 +84,21 @@ export async function hasSuccess(postId) {
   return rows.length > 0;
 }
 
+/**
+ * Этот пост уже уехал в эту группу? Нужно дневному лимиту: повторная публикация
+ * того же поста обновляет существующую строку и лимит второй раз не расходует.
+ */
+export async function isPublished(postId, groupId) {
+  const { rows } = await query(
+    `SELECT 1 FROM publications
+      WHERE post_id = $1 AND group_id = $2
+        AND error IS NULL AND pmp_publication_id IS NOT NULL
+      LIMIT 1`,
+    [postId, groupId],
+  );
+  return rows.length > 0;
+}
+
 export async function listByPost(postId) {
   const { rows } = await query(
     `SELECT p.*, g.name AS group_name, g.login AS group_login

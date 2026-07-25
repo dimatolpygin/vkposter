@@ -22,6 +22,9 @@ const logger = log('публикация');
  *    от API вместо «группа отвалилась, переподключите в postmypost».
  * 3. **Сбой одной группы не роняет остальные.** Каждая группа — своя публикация,
  *    своя строка в `publications`, своя ошибка.
+ * 4. **Дневной лимит группы соблюдается здесь, а не только в планировщике.** `posts_per_day`
+ *    задаёт клиент в разделе «Группы», и значение должно работать сразу — иначе поле
+ *    в панели врёт до этапа 8. Считаются успешные публикации за сегодня по МСК.
  *
  * Режим по умолчанию — `draft` (черновик, настройка `publish_mode`): на стену ничего
  * не уходит, но результат виден в интерфейсе postmypost. `live` включается осознанно.
@@ -33,8 +36,9 @@ const logger = log('публикация');
  * @param {number[]} [options.groupIds] куда публиковать; по умолчанию — все активные группы
  * @param {'draft'|'live'} [options.mode] переопределить режим из настроек
  * @param {Date|number} [options.postAt] время публикации; по умолчанию «через N минут»
+ * @param {boolean} [options.ignoreDailyLimit] опубликовать сверх `posts_per_day` (ручной режим)
  */
-export async function publishPost(post, { groupIds, mode, postAt } = {}) {
+export async function publishPost(post, { groupIds, mode, postAt, ignoreDailyLimit = false } = {}) {
   if (!post) throw new Error('Пост не передан');
   if (!post.image_url) {
     throw new Error(`У поста #${post.id} нет обложки — сначала сгенерируйте картинку`);
@@ -88,6 +92,13 @@ export async function publishPost(post, { groupIds, mode, postAt } = {}) {
   for (const group of targets) {
     const account = accounts.get(String(group.pmp_account_id));
     try {
+      // Выключенная группа не получает посты — ни в прогоне, ни при явном выборе
+      // в панели. Иначе переключатель «включена/выключена» ничего не значил бы.
+      if (!group.is_active) {
+        throw new Error(
+          `Группа «${group.name}» выключена в разделе «Группы» — посты в неё не уходят`,
+        );
+      }
       if (!account) {
         throw new Error(
           `Группа «${group.name}» (аккаунт ${group.pmp_account_id}) не найдена в postmypost — ` +
@@ -103,6 +114,20 @@ export async function publishPost(post, { groupIds, mode, postAt } = {}) {
         );
       }
       await groups.setConnectionStatus(group.id, account.connection_status);
+
+      // Дневной лимит группы. Уже опубликованный в эту группу пост лимит не расходует
+      // повторно: повтор обновляет ту же строку в publications, а не добавляет новую.
+      if (!ignoreDailyLimit) {
+        const limit = Number(group.posts_per_day);
+        const alreadyToday = await groups.publishedToday(group.id);
+        const isRepeat = await publications.isPublished(post.id, group.id);
+        if (!isRepeat && alreadyToday >= limit) {
+          throw new Error(
+            `Дневной лимит группы «${group.name}» исчерпан: ${alreadyToday} из ${limit} ` +
+              'за сегодня. Поменяйте «постов в день» в разделе «Группы» или подождите до завтра.',
+          );
+        }
+      }
 
       const publication = await pmp.createPublication({
         accountId: group.pmp_account_id,

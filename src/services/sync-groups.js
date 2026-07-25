@@ -1,5 +1,6 @@
 import * as pmp from '../lib/postmypost.js';
 import * as groups from '../repo/groups.js';
+import * as settings from '../repo/settings.js';
 import { log } from '../logger.js';
 
 const logger = log('группы');
@@ -8,28 +9,38 @@ const logger = log('группы');
  * Список групп ВК из postmypost → в БД.
  *
  * Клиент подключает группу в postmypost, а числовые id в панель не вписывает.
- * Полноценный раздел «Группы» (вкл/выкл, постов в день) — этап 7; здесь синхронизация,
- * без которой публиковать некуда.
  *
  * Фильтр по `chanel_id = 2` (ВК) стоит в клиенте: в проекте могут быть и Telegram,
  * и Instagram, а этот проект — про ВК.
+ *
+ * Скрытые группы синхронизация не возвращает: если клиент удалил группу из панели,
+ * она не должна всплывать обратно при каждом обновлении списка. Вернуть её можно
+ * кнопкой в разделе «Группы» — там видно, что она скрыта, а не потеряна.
  */
 export async function syncGroups() {
   const accounts = await pmp.vkAccounts();
+  const defaultPerDay = await settings.getInt('default_posts_per_day', 10);
+
   let added = 0;
   let updated = 0;
   let broken = 0;
+  let hidden = 0;
 
   for (const account of accounts) {
-    const row = await groups.upsertFromPmp(account);
+    const row = await groups.upsertFromPmp(account, { postsPerDay: defaultPerDay });
+    if (row.deleted_at) {
+      hidden += 1;
+      continue;
+    }
     if (row.inserted) added += 1;
     else updated += 1;
     if (Number(account.connection_status) !== pmp.CONNECTION_OK) broken += 1;
   }
 
   logger.info(
-    { всего: accounts.length, добавлено: added, обновлено: updated, отвалилось: broken },
-    `Групп ВК в postmypost: ${accounts.length} (новых ${added}, отвалившихся ${broken})`,
+    { всего: accounts.length, добавлено: added, обновлено: updated, отвалилось: broken, скрыто: hidden },
+    `Групп ВК в postmypost: ${accounts.length} (новых ${added}, отвалившихся ${broken}` +
+      (hidden ? `, скрытых ${hidden}` : '') + ')',
   );
-  return { total: accounts.length, added, updated, broken };
+  return { total: accounts.length, added, updated, broken, hidden };
 }
