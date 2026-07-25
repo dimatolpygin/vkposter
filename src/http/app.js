@@ -3,6 +3,7 @@ import cookieParser from 'cookie-parser';
 import { config } from '../config.js';
 import { log, errFields } from '../logger.js';
 import { getRequestId } from '../context.js';
+import { mediaRoot } from '../lib/media.js';
 import { requestContext } from './middleware/request-context.js';
 import { loadUser } from '../auth/middleware.js';
 import { healthRouter } from './routes/health.js';
@@ -25,6 +26,23 @@ export function createApp() {
 
   // /health открыт без авторизации — его дёргает healthcheck контейнера.
   app.use(healthRouter());
+
+  // Обложки постов раздаются БЕЗ авторизации и намеренно: postmypost скачивает картинку
+  // по URL сам, в момент публикации, и никаких cookie у него нет. Отдаём только файлы
+  // из тома media, статикой, с длинным кешем — имена уникальны, перезаписи не бывает.
+  app.use(
+    '/media',
+    express.static(mediaRoot(), {
+      index: false,
+      dotfiles: 'ignore',
+      maxAge: '30d',
+    }),
+  );
+  // Несуществующий файл обложки не должен проваливаться в панель и получать редирект
+  // на форму входа — отвечаем честным 404 прямо здесь.
+  app.use('/media', (req, res) => {
+    res.status(404).json({ error: 'Файл не найден', path: req.originalUrl });
+  });
 
   if (!config.isProd) {
     app.use(debugRouter());

@@ -86,7 +86,13 @@ export async function request(url, options = {}) {
   for (let attempt = 1; attempt <= retries + 1; attempt += 1) {
     const startedAt = process.hrtime.bigint();
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(new Error(`таймаут ${timeoutMs} мс`)), timeoutMs);
+    // Свой флаг, а не error.name: при abort(reason) fetch отдаёт наш reason, у которого
+    // name === 'Error', и таймаут в логе выглядел бы как «сетевая ошибка».
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort(new Error(`таймаут ${timeoutMs} мс`));
+    }, timeoutMs);
 
     try {
       const response = await fetch(url, {
@@ -134,7 +140,7 @@ export async function request(url, options = {}) {
       const ms = Math.round(Number(process.hrtime.bigint() - startedAt) / 1e6);
       if (error instanceof HttpError) throw error;
 
-      const isAbort = error.name === 'AbortError';
+      const isAbort = timedOut || error.name === 'AbortError';
       const retryable = attempt <= retries;
       logger.warn(
         { провайдер: label, method, url, ms, попытка: attempt, ...errFields(error) },

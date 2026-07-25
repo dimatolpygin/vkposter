@@ -9,6 +9,8 @@ import * as prompts from '../../repo/prompts.js';
 import * as posts from '../../repo/posts.js';
 import { checkSource } from '../../services/check-source.js';
 import { generatePost } from '../../services/generate-post.js';
+import { generateImageForPost } from '../../services/generate-image.js';
+import * as kie from '../../lib/kie.js';
 import { log, errFields } from '../../logger.js';
 
 const logger = log('панель');
@@ -381,12 +383,14 @@ export function panelRouter() {
       const list = await posts.listRecent(30);
       const totals = await posts.countAll();
       const nextArticle = await posts.nextArticleForGeneration();
+      const nextWithoutImage = await posts.nextWithoutImage();
 
       const rows = list.length
         ? list
             .map(
               (item) => `<tr>
                 <td>#${item.id}</td>
+                <td>${thumbCell(item)}</td>
                 <td><a href="/posts/${item.id}">${esc(item.title)}</a>
                     <br><span class="hint">${esc(item.source_code ?? '')} · тема
                     <code>${esc(item.topic_key ?? '—')}</code></span></td>
@@ -404,14 +408,33 @@ export function panelRouter() {
               </tr>`,
             )
             .join('\n')
-        : '<tr><td colspan="7" class="empty">Постов пока нет.</td></tr>';
+        : '<tr><td colspan="8" class="empty">Постов пока нет.</td></tr>';
 
       const body = `
         <div class="grid">
           ${stat(totals.total, 'Постов всего')}
           ${stat(totals.failed, 'Сбоев генерации')}
           ${stat(`$${Number(totals.cost).toFixed(4)}`, 'Израсходовано на текст')}
+          ${stat(`${totals.with_image} из ${totals.total}`, 'С обложкой')}
+          ${stat(await creditsText(), 'Кредитов на kie.ai')}
         </div>
+        ${nextWithoutImage
+          ? `<div class="card">
+               <h2 style="margin-top:0">Пост без обложки</h2>
+               <p style="margin:0 0 4px"><strong>#${nextWithoutImage.id}
+                 ${esc(nextWithoutImage.title)}</strong></p>
+               <p class="hint" style="margin:0 0 12px">
+                 Обложка делается через kie.ai и складывается в наш /media —
+                 временную ссылку провайдера в postmypost отдавать нельзя, она истекает.</p>
+               <form method="post" action="/posts/${nextWithoutImage.id}/image">
+                 <button type="submit">Сгенерировать обложку</button>
+               </form>
+               ${nextWithoutImage.image_error
+                 ? `<p class="hint" style="margin:10px 0 0">Прошлая попытка:
+                    ${esc(nextWithoutImage.image_error)}</p>`
+                 : ''}
+             </div>`
+          : ''}
         <div class="card">
           <h2 style="margin-top:0">Следующий материал в очереди</h2>
           ${nextArticle
@@ -434,7 +457,7 @@ export function panelRouter() {
         <div class="card">
           <table>
             <thead><tr>
-              <th>ID</th><th>Заголовок</th><th>Символов</th><th>Модель</th>
+              <th>ID</th><th>Обложка</th><th>Заголовок</th><th>Символов</th><th>Модель</th>
               <th>Время / цена</th><th>Статус</th><th>Создан</th>
             </tr></thead>
             <tbody>${rows}</tbody>
@@ -472,6 +495,26 @@ export function panelRouter() {
     }
   });
 
+  // Обложка поста. Генерация синхронная: человек в панели ждёт результат, а kie.ai
+  // отвечает за 30-90 секунд — очередь появится вместе с кроном на этапе 9.
+  router.post('/posts/:id/image', async (req, res) => {
+    const id = Number.parseInt(req.params.id, 10);
+    try {
+      const post = await posts.findById(id);
+      if (!post) throw new Error(`Поста #${id} нет`);
+      const updated = await generateImageForPost(post);
+      res.redirect(
+        `/posts/${id}?ok=${encodeURIComponent(
+          `Обложка готова: кредитов ${updated.image_credits ?? '?'}, ` +
+            `${Math.round((updated.image_latency_ms ?? 0) / 1000)} c`,
+        )}`,
+      );
+    } catch (error) {
+      logger.error({ пост: id, ...errFields(error) }, 'Генерация обложки из панели упала');
+      res.redirect(`/posts/${id}?err=${encodeURIComponent(error.message)}`);
+    }
+  });
+
   router.get('/posts/:id', async (req, res, next) => {
     try {
       const post = await posts.findById(Number.parseInt(req.params.id, 10));
@@ -494,6 +537,40 @@ export function panelRouter() {
             <tr><th>Длина</th><td>${post.char_count} символов</td></tr>
             <tr><th>request-id</th><td><code>${esc(post.request_id ?? '—')}</code></td></tr>
           </table>
+        </div>
+        <div class="card">
+          <h2 style="margin-top:0">Обложка</h2>
+          ${post.image_url
+            ? `<p style="margin:0 0 10px"><a href="${esc(post.image_url)}" target="_blank"
+                 rel="noopener"><img src="${esc(post.image_url)}" alt="Обложка поста"
+                 style="max-width:100%;border-radius:8px"></a></p>
+               <table>
+                 <tr><th>Публичный URL</th><td><a href="${esc(post.image_url)}" target="_blank"
+                   rel="noopener">${esc(post.image_url)}</a></td></tr>
+                 <tr><th>Файл на диске</th><td><code>${esc(post.image_path ?? '—')}</code></td></tr>
+                 <tr><th>Задача kie.ai</th><td><code>${esc(post.image_task_id ?? '—')}</code></td></tr>
+                 <tr><th>Версия промта обложки</th><td>${esc(post.image_prompt_version ?? '—')}</td></tr>
+                 <tr><th>Кредитов / время</th><td>${esc(post.image_credits ?? '—')} ·
+                   ${post.image_latency_ms ? `${Math.round(post.image_latency_ms / 1000)} c` : '—'}</td></tr>
+                 <tr><th>Сделана</th><td>${esc(formatDate(post.image_generated_at))}</td></tr>
+               </table>
+               <p class="hint" style="margin:10px 0 0">
+                 Мини-превью — так обложка выглядит в ленте:
+                 <img src="${esc(post.image_url)}" alt="" style="width:160px;vertical-align:middle;
+                   border-radius:4px;margin-left:8px"></p>`
+            : `<p class="hint" style="margin:0 0 10px">Обложки ещё нет.${
+                post.image_error ? ` Прошлая попытка: ${esc(post.image_error)}` : ''
+              }${
+                post.image_task_id
+                  ? ` Есть незавершённая задача <code>${esc(post.image_task_id)}</code> —
+                      она уже оплачена, повторный запуск дочитает её, а не создаст новую.`
+                  : ''
+              }</p>`}
+          <form method="post" action="/posts/${post.id}/image" style="margin-top:10px">
+            <button ${post.image_url ? 'class="ghost"' : ''} type="submit">${
+              post.image_url ? 'Сгенерировать заново' : 'Сгенерировать обложку'
+            }</button>
+          </form>
         </div>
         <div class="card">
           <h2 style="margin-top:0">${esc(post.title)}</h2>
@@ -578,6 +655,31 @@ export function panelRouter() {
   }
 
   return router;
+}
+
+/** Миниатюра обложки в списке постов: 96 px — сразу видно, читается ли текст мелким. */
+function thumbCell(item) {
+  if (item.image_url) {
+    return `<a href="/posts/${item.id}"><img src="${esc(item.image_url)}" alt=""
+      style="width:96px;border-radius:4px;display:block"></a>`;
+  }
+  if (item.image_error) return `<span class="tag off">сбой</span>`;
+  return '<span class="hint">нет</span>';
+}
+
+/**
+ * Остаток кредитов kie.ai. Живой запрос к провайдеру, поэтому в панели он не должен
+ * ломать страницу: недоступный kie.ai не повод не показать список постов.
+ */
+async function creditsText() {
+  if (!kie.isConfigured()) return 'ключ не задан';
+  try {
+    const left = await kie.credits();
+    return left === null ? '?' : left;
+  } catch (error) {
+    logger.warn(errFields(error), 'Не удалось узнать остаток кредитов kie.ai');
+    return 'недоступно';
+  }
 }
 
 function stat(value, label) {

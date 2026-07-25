@@ -50,6 +50,9 @@ services:
       OPENROUTER_TIMEOUT_MS: ${OPENROUTER_TIMEOUT_MS:-120000}
       KIE_API_KEY: ${KIE_API_KEY:-}
       KIE_MODEL: ${KIE_MODEL:-gpt-image-2}
+      KIE_BASE_URL: ${KIE_BASE_URL:-https://api.kie.ai/api/v1}
+      KIE_TIMEOUT_MS: ${KIE_TIMEOUT_MS:-60000}
+      MEDIA_DIR: ${MEDIA_DIR:-/app/media}
       POSTMYPOST_BASE_URL: ${POSTMYPOST_BASE_URL:-https://api.postmypost.io/v4.1}
       POSTMYPOST_TOKEN: ${POSTMYPOST_TOKEN:-}
       POSTMYPOST_PROJECT_ID: ${POSTMYPOST_PROJECT_ID:-}

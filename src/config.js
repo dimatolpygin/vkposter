@@ -82,6 +82,20 @@ export const config = {
     timeoutMs: envInt('OPENROUTER_TIMEOUT_MS', 120_000),
   },
 
+  kie: {
+    apiKey: env('KIE_API_KEY'),
+    // baseUrl вынесен по той же причине, что у openrouter: в dev на него подставляется
+    // локальная заглушка (/_debug/kie) — можно проверить таймауты, 402 и провал задачи,
+    // не расходуя кредиты.
+    baseUrl: env('KIE_BASE_URL', { fallback: 'https://api.kie.ai/api/v1' }),
+    // В .env лежит короткое имя (gpt-image-2), а API ждёт полное с суффиксом режима.
+    model: env('KIE_MODEL', { fallback: 'gpt-image-2' }),
+    timeoutMs: envInt('KIE_TIMEOUT_MS', 60_000),
+  },
+
+  // Куда складываем обложки. Том media примонтирован сюда в обоих режимах compose.
+  mediaDir: env('MEDIA_DIR', { fallback: '/app/media' }),
+
   // Общий User-Agent для прямых запросов к источникам: часть сайтов режет пустой UA.
   userAgent: env(
     'HTTP_USER_AGENT',

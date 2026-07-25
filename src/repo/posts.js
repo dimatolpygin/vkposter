@@ -61,10 +61,63 @@ export async function findById(id) {
   return rows[0] ?? null;
 }
 
+/**
+ * Задача обложки записывается ДО поллинга: кредиты kie.ai списываются за задачу,
+ * и потерянный taskId — это потерянные деньги. Заодно чистим прошлую ошибку.
+ */
+export async function setImageTask(postId, taskId, promptVersion) {
+  await query(
+    `UPDATE posts
+        SET image_task_id = $2, image_prompt_version = $3, image_error = NULL
+      WHERE id = $1`,
+    [postId, taskId, promptVersion ?? null],
+  );
+}
+
+export async function setImage(postId, { url, path: filePath, credits, latencyMs }) {
+  const { rows } = await query(
+    `UPDATE posts
+        SET image_url = $2, image_path = $3, image_credits = $4, image_latency_ms = $5,
+            image_error = NULL, image_generated_at = now()
+      WHERE id = $1
+      RETURNING *`,
+    [postId, url, filePath, credits ?? null, latencyMs ?? null],
+  );
+  return rows[0] ?? null;
+}
+
+/**
+ * @param {boolean} [clearTask] снять image_task_id. Нужно, когда задача провалилась
+ *   окончательно: иначе следующий запуск будет вечно дочитывать мёртвую задачу вместо
+ *   новой генерации. При таймауте, наоборот, id сохраняется — задача оплачена и жива.
+ */
+export async function setImageError(postId, message, { clearTask = false } = {}) {
+  await query(
+    clearTask
+      ? `UPDATE posts SET image_error = $2, image_task_id = NULL WHERE id = $1`
+      : `UPDATE posts SET image_error = $2 WHERE id = $1`,
+    [postId, String(message).slice(0, 1000)],
+  );
+}
+
+/** Готовый пост без обложки — кандидат на генерацию картинки (нужно крону на этапе 9). */
+export async function nextWithoutImage() {
+  const { rows } = await query(
+    `SELECT p.*, a.topic_name
+       FROM posts p
+       LEFT JOIN articles a ON a.id = p.article_id
+      WHERE p.status = 'ready' AND p.image_path IS NULL
+      ORDER BY p.id ASC
+      LIMIT 1`,
+  );
+  return rows[0] ?? null;
+}
+
 export async function listRecent(limit = 30) {
   const { rows } = await query(
     `SELECT p.id, p.title, p.char_count, p.status, p.model, p.provider, p.cost_usd,
             p.latency_ms, p.attempts, p.topic_key, p.created_at, p.error,
+            p.image_url, p.image_path, p.image_credits, p.image_error,
             a.url AS article_url, s.code AS source_code
        FROM posts p
        LEFT JOIN articles a ON a.id = p.article_id
@@ -118,6 +171,8 @@ export async function countAll() {
   const { rows } = await query(
     `SELECT count(*)::int AS total,
             count(*) FILTER (WHERE status = 'failed')::int AS failed,
+            count(*) FILTER (WHERE image_path IS NOT NULL)::int AS with_image,
+            COALESCE(sum(image_credits), 0)::int AS image_credits,
             COALESCE(sum(cost_usd), 0)::numeric AS cost
        FROM posts`,
   );
