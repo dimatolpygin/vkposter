@@ -3,6 +3,7 @@ import { logger, log, errFields } from './logger.js';
 import { runWithContext, newRequestId } from './context.js';
 import { pool, waitForDatabase, closePool } from './db/pool.js';
 import { runMigrations } from './db/migrate.js';
+import { runSeeds } from './bootstrap/seed.js';
 import { createApp } from './http/app.js';
 
 const startupLog = log('запуск');
@@ -29,6 +30,9 @@ async function main() {
     [process.env.APP_VERSION ?? '0.1.0'],
   );
   startupLog.info({ запусков: rows[0]?.boot_count }, `Запуск номер ${rows[0]?.boot_count} записан в БД`);
+
+  // Аккаунт панели и промты — после миграций, до приёма запросов.
+  await runSeeds();
 
   const app = createApp();
   const server = app.listen(config.http.port, '0.0.0.0', () => {

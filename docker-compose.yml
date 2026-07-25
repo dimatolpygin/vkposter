@@ -37,6 +37,20 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:3000}
+      # панель управления
+      SESSION_SECRET: ${SESSION_SECRET}
+      ADMIN_LOGIN: ${ADMIN_LOGIN:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      # внешние сервисы (подключаются на этапах 2, 4, 5, 6)
+      FIRECRAWL_API_KEY: ${FIRECRAWL_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-google/gemini-2.5-flash-lite}
+      OPENROUTER_FALLBACK_MODEL: ${OPENROUTER_FALLBACK_MODEL:-deepseek/deepseek-v4-flash:nitro}
+      KIE_API_KEY: ${KIE_API_KEY:-}
+      KIE_MODEL: ${KIE_MODEL:-gpt-image-2}
+      POSTMYPOST_BASE_URL: ${POSTMYPOST_BASE_URL:-https://api.postmypost.io/v4.1}
+      POSTMYPOST_TOKEN: ${POSTMYPOST_TOKEN:-}
+      POSTMYPOST_PROJECT_ID: ${POSTMYPOST_PROJECT_ID:-}
       TZ: Europe/Moscow
     ports:
       - "${APP_PORT:-3000}:3000"

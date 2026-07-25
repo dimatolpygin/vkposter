@@ -55,6 +55,16 @@ export const config = {
     connectRetryDelayMs: envInt('DB_CONNECT_RETRY_DELAY_MS', 2000),
   },
 
+  session: {
+    secret: env('SESSION_SECRET', { required: true }),
+  },
+
+  // Первичная установка аккаунта панели. Дальше пароль живёт в БД и меняется в панели.
+  admin: {
+    login: env('ADMIN_LOGIN', { fallback: 'admin' }),
+    initialPassword: env('ADMIN_PASSWORD'),
+  },
+
   // Публичный базовый URL — нужен на этапе 5, чтобы отдавать картинки в postmypost.
   publicBaseUrl: env('PUBLIC_BASE_URL', { fallback: 'http://localhost:3000' }),
 };

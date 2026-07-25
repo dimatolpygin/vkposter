@@ -1,9 +1,13 @@
 import express from 'express';
+import cookieParser from 'cookie-parser';
 import { config } from '../config.js';
 import { log, errFields } from '../logger.js';
 import { getRequestId } from '../context.js';
 import { requestContext } from './middleware/request-context.js';
+import { loadUser } from '../auth/middleware.js';
 import { healthRouter } from './routes/health.js';
+import { authRouter } from './routes/auth.js';
+import { panelRouter } from './routes/panel.js';
 import { debugRouter } from './routes/debug.js';
 
 const logger = log('http');
@@ -17,7 +21,9 @@ export function createApp() {
   app.use(requestContext());
   app.use(express.json({ limit: '1mb' }));
   app.use(express.urlencoded({ extended: false }));
+  app.use(cookieParser());
 
+  // /health открыт без авторизации — его дёргает healthcheck контейнера.
   app.use(healthRouter());
 
   if (!config.isProd) {
@@ -25,12 +31,10 @@ export function createApp() {
     logger.warn('Подключены отладочные роуты /_debug/* (только вне production)');
   }
 
-  // Заглушка корня — панель появится на этапе 1.
-  app.get('/', (_req, res) => {
-    res.type('text/plain; charset=utf-8').send(
-      'vkposter — автопостинг ВК. Панель управления появится на этапе 1. Проверка: GET /health\n',
-    );
-  });
+  // Всё ниже знает, вошёл пользователь или нет.
+  app.use(loadUser());
+  app.use(authRouter());
+  app.use(panelRouter());
 
   app.use((req, res) => {
     res.status(404).json({ error: 'Не найдено', path: req.originalUrl, request_id: getRequestId() });
