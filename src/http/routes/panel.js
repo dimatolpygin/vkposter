@@ -5,7 +5,10 @@ import { query } from '../../db/pool.js';
 import * as sources from '../../repo/sources.js';
 import * as settings from '../../repo/settings.js';
 import * as articles from '../../repo/articles.js';
+import * as prompts from '../../repo/prompts.js';
+import * as posts from '../../repo/posts.js';
 import { checkSource } from '../../services/check-source.js';
+import { generatePost } from '../../services/generate-post.js';
 import { log, errFields } from '../../logger.js';
 
 const logger = log('панель');
@@ -321,23 +324,12 @@ export function panelRouter() {
   // ── Промты ───────────────────────────────────────────────────────────────
   router.get('/prompts', async (req, res, next) => {
     try {
-      const postPrompt = await settings.get('post_prompt', '');
-      const imagePrompt = await settings.get('image_prompt', '');
-
       const body = `
-        <div class="card">
-          <h2 style="margin-top:0">Промт текста поста</h2>
-          <div class="hint" style="margin-bottom:8px">
-            ${postPrompt.length} символов. Хранится в БД, правка появится на этапе 4.
-          </div>
-          <textarea rows="16" readonly>${esc(postPrompt)}</textarea>
-        </div>
-        <div class="card">
-          <h2 style="margin-top:0">Промт обложки</h2>
-          <div class="hint" style="margin-bottom:8px">${imagePrompt.length} символов.</div>
-          <textarea rows="6" readonly>${esc(imagePrompt)}</textarea>
-        </div>
-        ${soon(4, 'Правка промтов с версиями и откатом.')}`;
+        ${await promptCard('post_prompt', 'Промт текста поста', 20,
+          'Системная часть запроса к модели. Правка создаёт новую версию и применяется ' +
+          'к следующей генерации сразу, без перезапуска контейнера.')}
+        ${await promptCard('image_prompt', 'Промт обложки', 8,
+          'Используется при генерации картинки (этап 5).')}`;
 
       res.type('html').send(
         page({
@@ -346,6 +338,177 @@ export function panelRouter() {
           user: req.user,
           heading: 'Промты',
           sub: 'Промт клиента живёт в базе, а не в коде: правится в панели без пересборки.',
+          message: buildSourceMessage(req.query),
+          body,
+        }),
+      );
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.post('/prompts/:key', async (req, res) => {
+    const key = req.params.key;
+    try {
+      const text = String(req.body.body ?? '').trim();
+      if (!['post_prompt', 'image_prompt'].includes(key)) throw new Error('Неизвестный промт');
+      if (text.length < 50) throw new Error('Промт слишком короткий — похоже на случайное сохранение');
+      const version = await prompts.saveVersion(key, text, {
+        note: String(req.body.note ?? '').trim() || null,
+        createdBy: req.user.login,
+      });
+      res.redirect(`/prompts?ok=${encodeURIComponent(`${key}: сохранена версия ${version}`)}`);
+    } catch (error) {
+      logger.error({ промт: key, ...errFields(error) }, 'Сохранение промта упало');
+      res.redirect(`/prompts?err=${encodeURIComponent(error.message)}`);
+    }
+  });
+
+  router.post('/prompts/:key/activate/:version', async (req, res) => {
+    const { key, version } = req.params;
+    try {
+      await prompts.activateVersion(key, Number.parseInt(version, 10), { by: req.user.login });
+      res.redirect(`/prompts?ok=${encodeURIComponent(`${key}: активна версия ${version}`)}`);
+    } catch (error) {
+      logger.error({ промт: key, версия: version, ...errFields(error) }, 'Откат промта упал');
+      res.redirect(`/prompts?err=${encodeURIComponent(error.message)}`);
+    }
+  });
+
+  // ── Посты ────────────────────────────────────────────────────────────────
+  router.get('/posts', async (req, res, next) => {
+    try {
+      const list = await posts.listRecent(30);
+      const totals = await posts.countAll();
+      const nextArticle = await posts.nextArticleForGeneration();
+
+      const rows = list.length
+        ? list
+            .map(
+              (item) => `<tr>
+                <td>#${item.id}</td>
+                <td><a href="/posts/${item.id}">${esc(item.title)}</a>
+                    <br><span class="hint">${esc(item.source_code ?? '')} · тема
+                    <code>${esc(item.topic_key ?? '—')}</code></span></td>
+                <td>${item.char_count}</td>
+                <td class="hint">${esc(item.model ?? '')}${
+                  item.attempts > 1 ? `<br>попыток ${item.attempts}` : ''
+                }</td>
+                <td class="hint">${item.latency_ms ? `${Math.round(item.latency_ms / 100) / 10} c` : ''}${
+                  item.cost_usd ? `<br>$${Number(item.cost_usd).toFixed(5)}` : ''
+                }</td>
+                <td>${item.status === 'failed'
+                    ? `<span class="tag off">сбой</span> <span class="hint">${esc(item.error ?? '')}</span>`
+                    : '<span class="tag on">готов</span>'}</td>
+                <td class="hint">${esc(formatDate(item.created_at))}</td>
+              </tr>`,
+            )
+            .join('\n')
+        : '<tr><td colspan="7" class="empty">Постов пока нет.</td></tr>';
+
+      const body = `
+        <div class="grid">
+          ${stat(totals.total, 'Постов всего')}
+          ${stat(totals.failed, 'Сбоев генерации')}
+          ${stat(`$${Number(totals.cost).toFixed(4)}`, 'Израсходовано на текст')}
+        </div>
+        <div class="card">
+          <h2 style="margin-top:0">Следующий материал в очереди</h2>
+          ${nextArticle
+            ? `<p style="margin:0 0 4px"><strong>${esc(nextArticle.topic_name ?? nextArticle.title ?? '')}</strong></p>
+               <p class="hint" style="margin:0 0 12px">${esc(nextArticle.source_code)} ·
+                 ${esc(formatDate(nextArticle.published_at))} ·
+                 ${nextArticle.content ? `текст ${nextArticle.content.length} симв.` : 'только тема'} ·
+                 <a href="${esc(nextArticle.url)}" target="_blank" rel="noopener">${esc(nextArticle.url)}</a></p>
+               <form method="post" action="/posts/generate">
+                 <button type="submit">Сгенерировать пост</button>
+               </form>`
+            : '<p class="hint" style="margin:0">Материалов, готовых к генерации, нет. ' +
+              'Проверьте источники в разделе «Источники».</p>'}
+          <p class="hint" style="margin:12px 0 0">
+            Очередь идёт от свежих к старым. Темы, по которым пост уже есть, пропускаются.
+          </p>
+        </div>
+
+        <h2>Сгенерированные посты</h2>
+        <div class="card">
+          <table>
+            <thead><tr>
+              <th>ID</th><th>Заголовок</th><th>Символов</th><th>Модель</th>
+              <th>Время / цена</th><th>Статус</th><th>Создан</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>`;
+
+      res.type('html').send(
+        page({
+          title: 'Посты',
+          active: '/posts',
+          user: req.user,
+          heading: 'Посты',
+          sub: 'Текст генерируется по промту из раздела «Промты» и проверяется на требования формата.',
+          message: buildSourceMessage(req.query),
+          body,
+        }),
+      );
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.post('/posts/generate', async (req, res) => {
+    try {
+      const article = req.body.article_id
+        ? await posts.findArticleForGeneration(Number.parseInt(req.body.article_id, 10))
+        : await posts.nextArticleForGeneration();
+      if (!article) throw new Error('Нет материалов, готовых к генерации');
+      // interactive: человек ждёт ответ, поэтому тир priority вместо flex
+      const post = await generatePost(article, { interactive: true });
+      res.redirect(`/posts/${post.id}?ok=${encodeURIComponent(`Пост #${post.id} готов`)}`);
+    } catch (error) {
+      logger.error(errFields(error), 'Генерация поста из панели упала');
+      res.redirect(`/posts?err=${encodeURIComponent(error.message)}`);
+    }
+  });
+
+  router.get('/posts/:id', async (req, res, next) => {
+    try {
+      const post = await posts.findById(Number.parseInt(req.params.id, 10));
+      if (!post) return res.status(404).type('html').send(
+        page({ title: 'Пост', active: '/posts', user: req.user, heading: 'Пост не найден',
+               sub: '', body: '<div class="card">Такого поста нет.</div>' }),
+      );
+
+      const body = `
+        <div class="card">
+          <table>
+            <tr><th>Тема</th><td><code>${esc(post.topic_key ?? '—')}</code></td></tr>
+            <tr><th>Источник</th><td>${esc(post.source_code ?? '—')}
+              ${post.article_url ? `<br><a href="${esc(post.article_url)}" target="_blank" rel="noopener" class="hint">${esc(post.article_url)}</a>` : ''}</td></tr>
+            <tr><th>Модель</th><td>${esc(post.model ?? '—')} ${esc(post.provider ? `(${post.provider})` : '')}</td></tr>
+            <tr><th>Версия промта</th><td>${esc(post.prompt_version ?? '—')}</td></tr>
+            <tr><th>Токенов</th><td>вход ${esc(post.tokens_in ?? '—')}, выход ${esc(post.tokens_out ?? '—')}</td></tr>
+            <tr><th>Стоимость</th><td>${post.cost_usd ? `$${Number(post.cost_usd).toFixed(6)}` : '—'}</td></tr>
+            <tr><th>Латентность</th><td>${esc(post.latency_ms ?? '—')} мс, попыток ${esc(post.attempts)}</td></tr>
+            <tr><th>Длина</th><td>${post.char_count} символов</td></tr>
+            <tr><th>request-id</th><td><code>${esc(post.request_id ?? '—')}</code></td></tr>
+          </table>
+        </div>
+        <div class="card">
+          <h2 style="margin-top:0">${esc(post.title)}</h2>
+          ${post.error ? `<p class="hint">Ошибка: ${esc(post.error)}</p>` : ''}
+          <pre style="white-space:pre-wrap;font:inherit;margin:0">${esc(post.body)}</pre>
+        </div>`;
+
+      res.type('html').send(
+        page({
+          title: `Пост #${post.id}`,
+          active: '/posts',
+          user: req.user,
+          heading: `Пост #${post.id}`,
+          sub: 'Текст в том виде, в котором уйдёт на стену группы.',
+          message: buildSourceMessage(req.query),
           body,
         }),
       );
@@ -361,6 +524,43 @@ export function panelRouter() {
     ['/runs', 'Прогоны', 11, 'История запусков: найдено, сгенерировано, опубликовано, ошибки, request-id.'],
     ['/published', 'Опубликовано', 11, 'Лог постов: группа, тема, время, ссылка на пост в ВК, обложка.'],
   ];
+
+  /** Карточка промта: правка, история версий, откат. */
+  async function promptCard(key, title, rows, hint) {
+    const active = await prompts.getActive(key);
+    const versions = await prompts.listVersions(key, 10);
+    const history = versions
+      .map(
+        (item) => `<tr>
+          <td>v${item.version}${item.is_active ? ' <span class="tag on">активна</span>' : ''}</td>
+          <td class="hint">${item.length} симв.</td>
+          <td class="hint">${esc(item.note ?? '')}</td>
+          <td class="hint">${esc(item.created_by ?? '')}<br>${esc(formatDate(item.created_at))}</td>
+          <td>${item.is_active ? '' : `<form class="inline" method="post"
+                action="/prompts/${key}/activate/${item.version}">
+                <button class="ghost small" type="submit">Вернуть эту</button></form>`}</td>
+        </tr>`,
+      )
+      .join('\n');
+
+    return `<div class="card">
+      <h2 style="margin-top:0">${esc(title)}</h2>
+      <div class="hint" style="margin-bottom:8px">
+        Активна версия ${esc(active?.version ?? '—')}, ${active?.body.length ?? 0} символов. ${esc(hint)}
+      </div>
+      <form method="post" action="/prompts/${key}">
+        <textarea name="body" rows="${rows}">${esc(active?.body ?? '')}</textarea>
+        <div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <input type="text" name="note" placeholder="что поменяли (необязательно)" style="flex:1;min-width:220px">
+          <button type="submit">Сохранить новую версию</button>
+        </div>
+      </form>
+      <h3 style="margin:18px 0 6px;font-size:14px">История версий</h3>
+      <table>
+        <tbody>${history}</tbody>
+      </table>
+    </div>`;
+  }
 
   for (const [href, title, stage, what] of stubs) {
     router.get(href, (req, res) => {

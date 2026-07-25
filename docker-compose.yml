@@ -46,6 +46,8 @@ services:
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       OPENROUTER_MODEL: ${OPENROUTER_MODEL:-google/gemini-2.5-flash-lite}
       OPENROUTER_FALLBACK_MODEL: ${OPENROUTER_FALLBACK_MODEL:-deepseek/deepseek-v4-flash:nitro}
+      OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
+      OPENROUTER_TIMEOUT_MS: ${OPENROUTER_TIMEOUT_MS:-120000}
       KIE_API_KEY: ${KIE_API_KEY:-}
       KIE_MODEL: ${KIE_MODEL:-gpt-image-2}
       POSTMYPOST_BASE_URL: ${POSTMYPOST_BASE_URL:-https://api.postmypost.io/v4.1}

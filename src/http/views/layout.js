@@ -17,6 +17,7 @@ const NAV = [
   { href: '/', title: 'Обзор' },
   { href: '/groups', title: 'Группы ВК' },
   { href: '/sources', title: 'Источники' },
+  { href: '/posts', title: 'Посты' },
   { href: '/settings', title: 'Настройки' },
   { href: '/prompts', title: 'Промты' },
   { href: '/manual', title: 'Ручной режим' },

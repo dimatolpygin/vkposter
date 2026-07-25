@@ -71,6 +71,17 @@ export const config = {
     timeoutMs: envInt('FIRECRAWL_TIMEOUT_MS', 90_000),
   },
 
+  openrouter: {
+    apiKey: env('OPENROUTER_API_KEY'),
+    // baseUrl вынесен в переменную не для красоты: в dev на него можно подставить
+    // локальную заглушку (/_debug/openrouter) и проверить весь конвейер генерации,
+    // не расходуя кредиты и не завися от доступности провайдера.
+    baseUrl: env('OPENROUTER_BASE_URL', { fallback: 'https://openrouter.ai/api/v1' }),
+    model: env('OPENROUTER_MODEL', { fallback: 'google/gemini-2.5-flash-lite' }),
+    fallbackModel: env('OPENROUTER_FALLBACK_MODEL', { fallback: 'deepseek/deepseek-v4-flash:nitro' }),
+    timeoutMs: envInt('OPENROUTER_TIMEOUT_MS', 120_000),
+  },
+
   // Общий User-Agent для прямых запросов к источникам: часть сайтов режет пустой UA.
   userAgent: env(
     'HTTP_USER_AGENT',
