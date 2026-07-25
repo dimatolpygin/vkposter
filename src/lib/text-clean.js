@@ -6,14 +6,20 @@
  * код — за чистоту разметки.
  *
  * Что НЕЛЬЗЯ трогать (осознанный стиль клиента, а не мусор):
- *   - булиты «— пункт» в начале строки: так устроен формат поста в промте;
+ *   - сами булиты в начале строки: так устроен формат поста в промте;
  *   - эмодзи-иконки 🔰 ❗️ ✅ — маркеры подзаголовков и рекламного блока;
  *   - разделители «--------» вокруг рекламного блока.
- * Убирается только markdown-разметка и тире «—» ВНУТРИ предложений.
+ *
+ * Что делается с тире: внутри предложения оно убирается, а там, где остаётся
+ * (булиты, рекламный блок), длинное «—» заменяется коротким «-». Длинных тире
+ * в готовом тексте не остаётся вообще — требование заказчика.
  */
 
-/** Строка-булит: тире (или дефис) с пробелом в начале строки. Такие тире сохраняем. */
+/** Строка-булит: тире (или дефис) с пробелом в начале строки. Сам булит сохраняем. */
 const BULLET_LINE = /^(\s*)[—–-]\s+/;
+
+/** Длинное и среднее тире. В готовом тексте их быть не должно — только дефис. */
+const LONG_DASH = /[—–]/g;
 
 /** Ряд дефисов — разделитель рекламного блока из промта, не markdown-hr. */
 const AD_SEPARATOR = /^\s*-{4,}\s*$/;
@@ -21,8 +27,12 @@ const AD_SEPARATOR = /^\s*-{4,}\s*$/;
 function stripMarkdownInline(line) {
   return line
     // ссылки [текст](url) → «текст (url)»: ссылку из рекламного блока терять нельзя
-    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, (_, text, url) =>
-      text.trim() === url.trim() ? url : `${text} ${url}`)
+    // Сравнение без хвостового слэша: модель часто пишет [https://site.ru](https://site.ru/),
+    // и строгое равенство оставляло ссылку в тексте дважды.
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, (_, text, url) => {
+      const bare = (value) => value.trim().replace(/\/+$/, '');
+      return bare(text) === bare(url) ? url.trim() : `${text} ${url}`;
+    })
     // **жирный**, __жирный__, *курсив*, _курсив_
     .replace(/\*\*([^*]+)\*\*/g, '$1')
     .replace(/__([^_]+)__/g, '$1')
@@ -30,7 +40,11 @@ function stripMarkdownInline(line) {
     .replace(/(^|[\s(«"])_([^_\n]+)_(?=[\s).,!?»"]|$)/g, '$1$2')
     // `код` и ~~зачёркнутый~~
     .replace(/`([^`]+)`/g, '$1')
-    .replace(/~~([^~]+)~~/g, '$1');
+    .replace(/~~([^~]+)~~/g, '$1')
+    // «https://site.ru (https://site.ru/)» → одна ссылка. Так выглядит уже разобранная
+    // markdown-ссылка, у которой текст и адрес различались только слэшем.
+    .replace(/(https?:\/\/[^\s()]+?)\/?\s+\((https?:\/\/[^\s()]+?)\/?\)/g, (match, first, second) =>
+      first === second ? first : match);
 }
 
 /**
@@ -40,8 +54,9 @@ function stripMarkdownInline(line) {
  */
 function stripInlineDash(line) {
   const bullet = line.match(BULLET_LINE);
-  const head = bullet ? bullet[0] : '';
-  const rest = bullet ? line.slice(head.length) : line;
+  // Булит сохраняем как маркер, но приводим к короткому дефису.
+  const head = bullet ? `${bullet[1]}- ` : '';
+  const rest = bullet ? line.slice(bullet[0].length) : line;
   const cleaned = rest
     // «слово — слово» → «слово слово»; двойной пробел подчищается ниже
     .replace(/\s+[—–]\s+/g, ' ')
@@ -66,7 +81,9 @@ export function cleanPostText(raw) {
         insideAd = !insideAd;
         return line.trim();
       }
-      if (insideAd) return stripMarkdownInline(line).trimEnd();
+      // В рекламном блоке текст клиента дословный: тире там не удаляем (иначе ломается
+      // фраза «— он принес нам»), но длинное меняем на короткое.
+      if (insideAd) return stripMarkdownInline(line).replace(LONG_DASH, '-').trimEnd();
 
       let out = line
         // заголовки markdown: решётки убираем, текст оставляем
@@ -74,8 +91,8 @@ export function cleanPostText(raw) {
         // цитаты
         .replace(/^\s{0,3}>\s?/, '')
         // нумерованные и звёздочные списки приводим к булиту клиента
-        .replace(/^\s*\d+[.)]\s+/, '— ')
-        .replace(/^\s*[*+]\s+/, '— ');
+        .replace(/^\s*\d+[.)]\s+/, '- ')
+        .replace(/^\s*[*+]\s+/, '- ');
 
       out = stripMarkdownInline(out);
       out = stripInlineDash(out);
@@ -87,6 +104,8 @@ export function cleanPostText(raw) {
     .join('\n')
     // больше двух пустых строк подряд не нужно
     .replace(/\n{3,}/g, '\n\n')
+    // Контрольный проход: длинных тире в тексте не остаётся ни в каком виде.
+    .replace(LONG_DASH, '-')
     .trim();
 }
 
@@ -123,7 +142,9 @@ export function validatePost(text, { minChars, maxChars, adLink, topicName }) {
   }
   // Структура из промта клиента: два блока с булитами и блок «Итог». Проверяем кодом,
   // а не надеемся на модель: без булитов пост в ВК читается стеной текста.
-  const bulletLines = value.split('\n').filter((line) => /^\s*—\s+\S/.test(line)).length;
+  // Булит после чистки короткий, но принимаем и длинное тире: валидация вызывается
+  // и на тексте до постобработки (в тестах и при разборе сбоев).
+  const bulletLines = value.split('\n').filter((line) => /^\s*[—–-]\s+\S/.test(line)).length;
   if (bulletLines < 4) {
     problems.push(`мало пунктов-булитов: ${bulletLines}, нужно минимум 4 (по 2-3 в двух блоках)`);
   }
