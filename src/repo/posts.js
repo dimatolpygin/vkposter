@@ -193,6 +193,55 @@ export async function nextArticleForGeneration() {
   return rows[0] ?? null;
 }
 
+/**
+ * Кандидаты в очередь прогона: сначала уже готовые посты, потом материалы под генерацию.
+ * Порядок один и тот же — от свежих к старым по дате материала (требование брифа
+ * и критерий этапа 8).
+ *
+ * @param {number} limit сколько нужно
+ * @param {number[]} [excludeArticleIds] материалы, уже занятые другим планом
+ */
+export async function listReadyPosts(limit, excludeArticleIds = []) {
+  const { rows } = await query(
+    `SELECT p.id, p.title, p.article_id, p.image_url, p.topic_key,
+            COALESCE(a.published_at, a.lastmod) AS article_date,
+            a.topic_name, s.code AS source_code
+       FROM posts p
+       LEFT JOIN articles a ON a.id = p.article_id
+       LEFT JOIN sources s ON s.id = a.source_id
+      WHERE p.status = 'ready'
+        AND NOT EXISTS (SELECT 1 FROM publications pub
+                         WHERE pub.post_id = p.id AND pub.error IS NULL
+                           AND pub.pmp_publication_id IS NOT NULL)
+        AND (p.article_id IS NULL OR NOT (p.article_id = ANY($2::bigint[])))
+      ORDER BY COALESCE(a.published_at, a.lastmod) DESC NULLS LAST, p.id ASC
+      LIMIT $1`,
+    [limit, excludeArticleIds],
+  );
+  return rows;
+}
+
+/** Материалы под генерацию, от свежих к старым. Тот же фильтр, что у `nextArticleForGeneration`. */
+export async function listArticlesForGeneration(limit, excludeArticleIds = []) {
+  const { rows } = await query(
+    `SELECT a.id, a.url, a.title, a.content, a.topic_key, a.topic_name,
+            COALESCE(a.published_at, a.lastmod) AS published_at,
+            COALESCE(a.published_at, a.lastmod) AS article_date,
+            s.code AS source_code, s.content_mode
+       FROM articles a
+       JOIN sources s ON s.id = a.source_id
+      WHERE a.status IN ('new', 'fetched')
+        AND a.topic_key IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM posts p WHERE p.topic_key = a.topic_key AND p.status <> 'failed')
+        AND (s.content_mode = 'topic_only' OR a.content IS NOT NULL)
+        AND NOT (a.id = ANY($2::bigint[]))
+      ORDER BY COALESCE(a.published_at, a.lastmod) DESC NULLS LAST, a.id DESC
+      LIMIT $1`,
+    [limit, excludeArticleIds],
+  );
+  return rows;
+}
+
 export async function findArticleForGeneration(articleId) {
   const { rows } = await query(
     `SELECT a.id, a.url, a.title, a.content, a.topic_key, a.topic_name,

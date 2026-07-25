@@ -1,0 +1,152 @@
+import * as groups from '../repo/groups.js';
+import * as posts from '../repo/posts.js';
+import * as runs from '../repo/runs.js';
+import * as settings from '../repo/settings.js';
+import { slotTimes } from '../lib/schedule.js';
+import { log } from '../logger.js';
+
+const logger = log('план');
+
+/**
+ * План прогона: какой материал в какую группу и на какое время.
+ *
+ * Четыре правила, из которых собран этот файл:
+ *
+ * 1. **Один материал — одна группа.** Пересечений внутри прогона нет: раздача идёт
+ *    по кругу из общего списка кандидатов, каждый берётся ровно один раз. Дополнительно
+ *    это закрыто уникальным индексом `run_items (run_id, article_id)`.
+ * 2. **От свежих к старым.** Кандидаты (готовые посты и материалы под генерацию)
+ *    сливаются в один список и сортируются по дате материала; раздача по кругу
+ *    сохраняет этот порядок внутри каждой группы.
+ * 3. **Объём задаёт группа.** Квота = `posts_per_day` минус уже опубликованное сегодня.
+ * 4. **Время разносится по слотам** внутри окна постинга с джиттером: подряд идущие
+ *    посты в одну минуту выглядят как бот.
+ */
+
+/**
+ * @param {object} [options]
+ * @param {Date} [options.now]
+ * @param {number[]} [options.groupIds] ограничить план этими группами (ручной прогон)
+ * @param {number} [options.limitPerGroup] жёсткий потолок на группу (проверка, демо)
+ */
+export async function buildPlan({ now = new Date(), groupIds, limitPerGroup } = {}) {
+  const targets = groupIds?.length ? await groups.findByIds(groupIds) : await groups.listActive();
+  const active = targets.filter((group) => group.is_active);
+
+  if (active.length === 0) {
+    return { items: [], groups: [], reason: 'Нет включённых групп: включите группу в разделе «Группы»' };
+  }
+
+  const quotas = [];
+  for (const group of active) {
+    const publishedToday = await groups.publishedToday(group.id);
+    const cap = limitPerGroup ?? group.posts_per_day;
+    quotas.push({
+      group,
+      publishedToday,
+      quota: Math.max(0, Math.min(cap, group.posts_per_day) - publishedToday),
+    });
+  }
+
+  const capacity = quotas.reduce((sum, item) => sum + item.quota, 0);
+  if (capacity === 0) {
+    return {
+      items: [],
+      groups: quotas,
+      reason: 'Дневные лимиты всех включённых групп на сегодня исчерпаны',
+    };
+  }
+
+  // Материалы, занятые другими планами (в том числе незаконченным прогоном), в очередь
+  // не берём: иначе один материал уедет в две группы разными прогонами.
+  const busy = await runs.plannedArticleIds();
+  const ready = await posts.listReadyPosts(capacity, busy);
+  const fresh = await posts.listArticlesForGeneration(capacity, [
+    ...busy,
+    ...ready.map((row) => Number(row.article_id)).filter(Boolean),
+  ]);
+
+  const candidates = [
+    ...ready.map((row) => ({
+      kind: 'post',
+      postId: Number(row.id),
+      articleId: row.article_id ? Number(row.article_id) : null,
+      date: row.article_date,
+      label: row.title,
+      needsImage: !row.image_url,
+    })),
+    ...fresh.map((row) => ({
+      kind: 'article',
+      postId: null,
+      articleId: Number(row.id),
+      date: row.article_date,
+      label: row.topic_name ?? row.title ?? row.url,
+      needsImage: true,
+    })),
+  ].sort((a, b) => dateValue(b.date) - dateValue(a.date));
+
+  if (candidates.length === 0) {
+    return {
+      items: [],
+      groups: quotas,
+      reason: 'Нет материалов для постинга: проверьте источники в разделе «Источники»',
+    };
+  }
+
+  // Раздача по кругу: группы получают материалы по очереди, поэтому наборы не пересекаются,
+  // а внутри группы порядок остаётся «от свежих к старым».
+  const left = quotas.map((item) => ({ ...item, left: item.quota }));
+  const assignments = [];
+  let cursor = 0;
+  while (cursor < candidates.length && left.some((item) => item.left > 0)) {
+    let placed = false;
+    for (const slot of left) {
+      if (slot.left === 0 || cursor >= candidates.length) continue;
+      assignments.push({ group: slot.group, candidate: candidates[cursor] });
+      cursor += 1;
+      slot.left -= 1;
+      placed = true;
+    }
+    if (!placed) break;
+  }
+
+  const times = slotTimes(assignments.length, {
+    now,
+    windowStart: await settings.get('posting_window_start', '10:00'),
+    windowEnd: await settings.get('posting_window_end', '21:00'),
+    leadMinutes: await settings.getInt('publish_delay_minutes', 3),
+    jitterMinutes: await settings.getInt('slot_jitter_minutes', 7),
+  });
+
+  const items = assignments.map((assignment, index) => ({
+    groupId: assignment.group.id,
+    groupName: assignment.group.name,
+    slotNo: index + 1,
+    articleId: assignment.candidate.articleId,
+    postId: assignment.candidate.postId,
+    postAt: times[index],
+    label: assignment.candidate.label,
+    kind: assignment.candidate.kind,
+    date: assignment.candidate.date,
+  }));
+
+  logger.info(
+    { слотов: items.length, групп: active.length, ёмкость: capacity, кандидатов: candidates.length },
+    `План прогона: ${items.length} постов на ${active.length} групп ` +
+      `(ёмкость ${capacity}, кандидатов ${candidates.length})`,
+  );
+
+  return {
+    items,
+    groups: quotas,
+    reason: items.length < capacity
+      ? `Материалов меньше плана: ${items.length} из ${capacity}. Добор старыми темами — этап 9.`
+      : null,
+  };
+}
+
+function dateValue(value) {
+  if (!value) return 0;
+  const ms = new Date(value).getTime();
+  return Number.isNaN(ms) ? 0 : ms;
+}

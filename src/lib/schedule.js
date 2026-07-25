@@ -1,0 +1,120 @@
+/**
+ * Расписание прогонов и раскладка публикаций по времени.
+ *
+ * Время везде местное — контейнер живёт в `Europe/Moscow` (`tzdata` поставлен на этапе 0
+ * именно ради этого), поэтому `new Date(...)` и `getHours()` уже дают МСК. Отдельной
+ * арифметики с оффсетом здесь нет: она нужна только на границе с postmypost
+ * (`pmp.moscowIso`), где формат требует явного `+03:00`.
+ */
+
+/** «10:00» → {hours: 10, minutes: 0}. Мусор на входе не роняет прогон. */
+export function parseHhMm(value, fallback = '10:00') {
+  const match = /^(\d{1,2}):(\d{2})$/.exec(String(value ?? '').trim());
+  const source = match ? match : /^(\d{1,2}):(\d{2})$/.exec(fallback);
+  const hours = Math.min(23, Math.max(0, Number.parseInt(source[1], 10)));
+  const minutes = Math.min(59, Math.max(0, Number.parseInt(source[2], 10)));
+  return { hours, minutes };
+}
+
+function atTime(base, { hours, minutes }) {
+  const date = new Date(base);
+  date.setHours(hours, minutes, 0, 0);
+  return date;
+}
+
+function addDays(base, days) {
+  const date = new Date(base);
+  date.setDate(date.getDate() + days);
+  return date;
+}
+
+/**
+ * Когда прогон должен стартовать в следующий раз.
+ *
+ * Два режима из настроек:
+ * - `interval` — каждые N часов от последнего прогона (если прогонов не было, от «сейчас»);
+ * - `daily` — ежедневно в заданное время.
+ *
+ * @param {object} settingsMap значения из settings (schedule_mode, schedule_interval_hours, schedule_daily_at)
+ * @param {Date|string|null} lastRunAt старт последнего прогона
+ * @param {Date} [now]
+ */
+export function nextRunAt(settingsMap, lastRunAt = null, now = new Date()) {
+  const mode = settingsMap.schedule_mode === 'interval' ? 'interval' : 'daily';
+
+  if (mode === 'interval') {
+    const hours = Math.max(1, Number.parseInt(settingsMap.schedule_interval_hours ?? '5', 10) || 5);
+    const from = lastRunAt ? new Date(lastRunAt) : new Date(now);
+    let next = new Date(from.getTime() + hours * 3600_000);
+    // Пропущенные интервалы не копим: если контейнер стоял сутки, следующий запуск
+    // не «через час назад», а ближайший будущий.
+    while (next <= now) next = new Date(next.getTime() + hours * 3600_000);
+    return next;
+  }
+
+  const at = parseHhMm(settingsMap.schedule_daily_at, '10:00');
+  const today = atTime(now, at);
+  return today > now ? today : atTime(addDays(now, 1), at);
+}
+
+export function scheduleText(settingsMap) {
+  return settingsMap.schedule_mode === 'interval'
+    ? `каждые ${settingsMap.schedule_interval_hours} ч`
+    : `ежедневно в ${settingsMap.schedule_daily_at} МСК`;
+}
+
+/**
+ * Времена публикаций для `count` постов: равномерные слоты внутри окна постинга
+ * плюс случайный сдвиг. Всё в одну минуту не сваливается — это антиспам-требование
+ * брифа, и в ВК подряд идущие посты в одну секунду выглядят как бот.
+ *
+ * @param {number} count сколько слотов нужно
+ * @param {object} options
+ * @param {Date} [options.now]
+ * @param {string} [options.windowStart] «10:00»
+ * @param {string} [options.windowEnd] «21:00»
+ * @param {number} [options.leadMinutes] минимальный отрыв от «сейчас» (postmypost не любит прошлое)
+ * @param {number} [options.jitterMinutes] максимальный случайный сдвиг внутри слота
+ * @returns {Date[]} времена по возрастанию, минуты не повторяются
+ */
+export function slotTimes(count, {
+  now = new Date(),
+  windowStart = '10:00',
+  windowEnd = '21:00',
+  leadMinutes = 3,
+  jitterMinutes = 7,
+} = {}) {
+  if (count <= 0) return [];
+
+  const earliest = new Date(now.getTime() + leadMinutes * 60_000);
+  let start = atTime(now, parseHhMm(windowStart, '10:00'));
+  let end = atTime(now, parseHhMm(windowEnd, '21:00'));
+  if (end <= start) end = atTime(addDays(now, 1), parseHhMm(windowEnd, '21:00'));
+  if (earliest > start) start = earliest;
+
+  // Окно на сегодня уже закрылось (или закроется раньше, чем мы успеем) — переносим
+  // весь прогон на завтрашнее окно целиком, а не поджимаем посты к полуночи.
+  if (start >= end) {
+    start = atTime(addDays(now, 1), parseHhMm(windowStart, '10:00'));
+    end = atTime(addDays(now, 1), parseHhMm(windowEnd, '21:00'));
+    if (end <= start) end = new Date(start.getTime() + 3600_000);
+  }
+
+  const span = end.getTime() - start.getTime();
+  const step = count > 1 ? span / count : span;
+  const jitterMs = Math.max(0, jitterMinutes) * 60_000;
+
+  const times = [];
+  let previous = 0;
+  for (let index = 0; index < count; index += 1) {
+    const base = start.getTime() + step * index;
+    const jitter = Math.floor(Math.random() * Math.min(jitterMs, Math.max(0, step / 2)));
+    let ms = Math.min(base + jitter, end.getTime());
+    // Минуты не должны повторяться: postmypost округляет `post_at` до минуты, и два
+    // поста с одинаковым временем выглядят как один залп.
+    ms = Math.max(ms, previous + 60_000);
+    previous = ms;
+    times.push(new Date(Math.floor(ms / 60_000) * 60_000));
+  }
+  return times;
+}

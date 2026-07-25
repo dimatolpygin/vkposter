@@ -57,6 +57,35 @@ export async function withTransaction(fn) {
 }
 
 /**
+ * Выполнить работу под advisory lock — так параллельные прогоны не наступают друг на друга.
+ *
+ * Redis в проекте нет (2 ядра / 2 ГБ), поэтому блокировки держим в Postgres. Лок берётся
+ * на отдельном соединении и живёт ровно столько, сколько живёт это соединение: упавший
+ * процесс не оставляет вечный лок, потому что соединение закрывается вместе с ним.
+ *
+ * @param {number} key числовой ключ лока (свой на каждый вид работы)
+ * @param {(client: import('pg').PoolClient) => Promise<any>} fn работа под локом
+ * @returns {Promise<{acquired: boolean, result?: any}>} `acquired: false` — лок занят
+ */
+export async function withAdvisoryLock(key, fn) {
+  const client = await pool.connect();
+  try {
+    const { rows } = await client.query('SELECT pg_try_advisory_lock($1) AS ok', [key]);
+    if (!rows[0]?.ok) {
+      logger.warn({ лок: key }, 'Advisory lock занят — работа не начата');
+      return { acquired: false };
+    }
+    try {
+      return { acquired: true, result: await fn(client) };
+    } finally {
+      await client.query('SELECT pg_advisory_unlock($1)', [key]).catch(() => {});
+    }
+  } finally {
+    client.release();
+  }
+}
+
+/**
  * Ждём, пока БД примет соединение. Контейнер app стартует раньше postgres даже
  * с depends_on: condition: service_healthy — на медленной машине healthcheck может
  * успеть раньше, чем postgres реально готов принимать запросы.

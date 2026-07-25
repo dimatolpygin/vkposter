@@ -9,7 +9,11 @@ import * as prompts from '../../repo/prompts.js';
 import * as posts from '../../repo/posts.js';
 import * as groups from '../../repo/groups.js';
 import * as publications from '../../repo/publications.js';
+import * as runs from '../../repo/runs.js';
 import { checkSource } from '../../services/check-source.js';
+import { buildPlan } from '../../services/plan-run.js';
+import { runCycle } from '../../services/run-cycle.js';
+import { nextRunAt, scheduleText } from '../../lib/schedule.js';
 import { generatePost } from '../../services/generate-post.js';
 import { generateImageForPost } from '../../services/generate-image.js';
 import { publishPost } from '../../services/publish-post.js';
@@ -50,6 +54,8 @@ export function panelRouter() {
       `);
       const s = rows[0];
       const map = await settings.getMap();
+      const lastCycle = await runs.lastCycle();
+      const next = nextRunAt(map, lastCycle?.started_at ?? null);
 
       const body = `
         <div class="grid">
@@ -67,12 +73,17 @@ export function panelRouter() {
             <tr><th>Окно свежести</th><td>${esc(map.freshness_window_days)} дней</td></tr>
             <tr><th>Постов в день на группу</th><td>${esc(map.default_posts_per_day)}</td></tr>
             <tr><th>Расписание</th><td>${esc(scheduleText(map))}</td></tr>
+            <tr><th>Следующий запуск</th><td>${esc(formatDate(next))}
+              <span class="hint">автозапуск по расписанию включается на этапе 9;
+                сейчас это время, на которое встанет прогон</span></td></tr>
+            <tr><th>Окно публикаций</th><td>${esc(map.posting_window_start)}-${
+              esc(map.posting_window_end)} МСК, разброс до ${esc(map.slot_jitter_minutes)} мин</td></tr>
             <tr><th>Режим публикации</th><td>${publishModeTag(map.publish_mode)}</td></tr>
             <tr><th>Длина поста</th><td>${esc(map.post_min_chars)}-${esc(map.post_max_chars)} символов</td></tr>
           </table>
         </div>
-        <h2>Статус последнего прогона</h2>
-        ${soon(9, 'Появится вместе с автономным прогоном по расписанию.')}`;
+        <h2>Прогон</h2>
+        ${await runCard(lastCycle)}`;
 
       res.type('html').send(
         page({
@@ -81,6 +92,7 @@ export function panelRouter() {
           user: req.user,
           heading: 'Обзор',
           sub: 'Сводка по системе. Разделы наполняются по мере прохождения этапов.',
+          message: buildSourceMessage(req.query),
           body,
         }),
       );
@@ -305,7 +317,60 @@ export function panelRouter() {
         .join('\n');
 
       const mode = await settings.get('publish_mode', 'draft');
+      const map = await settings.getMap();
+      const next = nextRunAt(map, (await runs.lastCycle())?.started_at ?? null);
       const body = `
+        <div class="card">
+          <h2 style="margin-top:0">Расписание прогонов</h2>
+          <p class="hint" style="margin:0 0 12px">
+            Сейчас: ${esc(scheduleText(map))}. Следующий запуск ${esc(formatDate(next))}.
+            Автозапуск включается на этапе 9, но время считается уже по этим настройкам.
+          </p>
+          <form method="post" action="/settings/schedule">
+            <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end">
+              <label>режим<br>
+                <select name="schedule_mode">
+                  <option value="daily"${map.schedule_mode === 'daily' ? ' selected' : ''}>раз в день</option>
+                  <option value="interval"${map.schedule_mode === 'interval' ? ' selected' : ''}>каждые N часов</option>
+                </select></label>
+              <label>каждые N часов<br>
+                <input type="number" name="schedule_interval_hours" min="1" max="168"
+                       value="${esc(map.schedule_interval_hours)}" style="width:80px"></label>
+              <label>время ежедневного запуска<br>
+                <input type="text" name="schedule_daily_at" value="${esc(map.schedule_daily_at)}"
+                       placeholder="10:00" style="width:80px"></label>
+              <button type="submit">Сохранить расписание</button>
+            </div>
+          </form>
+        </div>
+        <div class="card">
+          <h2 style="margin-top:0">Окно публикаций и объём</h2>
+          <p class="hint" style="margin:0 0 12px">
+            Публикации разносятся по слотам внутри окна со случайным сдвигом: залп в одну
+            минуту выглядит как бот. «Постов в день» здесь - значение для новых групп;
+            у каждой группы своё в разделе «Группы».
+          </p>
+          <form method="post" action="/settings/posting">
+            <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end">
+              <label>окно с<br>
+                <input type="text" name="posting_window_start" value="${esc(map.posting_window_start)}"
+                       style="width:80px"></label>
+              <label>по<br>
+                <input type="text" name="posting_window_end" value="${esc(map.posting_window_end)}"
+                       style="width:80px"></label>
+              <label>разброс, мин<br>
+                <input type="number" name="slot_jitter_minutes" min="0" max="120"
+                       value="${esc(map.slot_jitter_minutes)}" style="width:80px"></label>
+              <label>окно свежести, дней<br>
+                <input type="number" name="freshness_window_days" min="1" max="3650"
+                       value="${esc(map.freshness_window_days)}" style="width:80px"></label>
+              <label>постов в день<br>
+                <input type="number" name="default_posts_per_day" min="0" max="100"
+                       value="${esc(map.default_posts_per_day)}" style="width:80px"></label>
+              <button type="submit">Сохранить</button>
+            </div>
+          </form>
+        </div>
         <div class="card">
           <h2 style="margin-top:0">Режим публикации</h2>
           <p style="margin:0 0 10px">Сейчас: ${publishModeTag(mode)}</p>
@@ -327,8 +392,11 @@ export function panelRouter() {
             <tbody>${rows}</tbody>
           </table>
         </div>
-        <h2>Редактирование остальных значений</h2>
-        ${soon(8, 'Формы правки окна свежести, расписания и объёма постов — вместе с планировщиком.')}`;
+        <p class="hint">
+          Остальные ключи правятся по месту: промты - в разделе «Промты», объём по группам -
+          в разделе «Группы». Служебные значения (таймауты и интервалы опроса провайдеров)
+          меняются миграцией.
+        </p>`;
 
       res.type('html').send(
         page({
@@ -365,6 +433,58 @@ export function panelRouter() {
       );
     } catch (error) {
       logger.error(errFields(error), 'Переключение режима публикации упало');
+      res.redirect(`/settings?err=${encodeURIComponent(error.message)}`);
+    }
+  });
+
+  router.post('/settings/schedule', async (req, res) => {
+    try {
+      const mode = req.body.schedule_mode === 'interval' ? 'interval' : 'daily';
+      const hours = requireInt(req.body.schedule_interval_hours, 1, 168, 'Интервал запуска, часов');
+      const at = requireHhMm(req.body.schedule_daily_at, 'Время ежедневного запуска');
+      await settings.set('schedule_mode', mode);
+      await settings.set('schedule_interval_hours', String(hours));
+      await settings.set('schedule_daily_at', at);
+      const map = await settings.getMap();
+      const next = nextRunAt(map, (await runs.lastCycle())?.started_at ?? null);
+      logger.info(
+        { режим: mode, интервал: hours, время: at, кто: req.user.login },
+        `Расписание изменено: ${scheduleText(map)}, следующий запуск ${formatDate(next)}`,
+      );
+      res.redirect(
+        `/settings?ok=${encodeURIComponent(
+          `Расписание: ${scheduleText(map)}. Следующий запуск ${formatDate(next)}`,
+        )}`,
+      );
+    } catch (error) {
+      logger.error(errFields(error), 'Сохранение расписания упало');
+      res.redirect(`/settings?err=${encodeURIComponent(error.message)}`);
+    }
+  });
+
+  router.post('/settings/posting', async (req, res) => {
+    try {
+      const start = requireHhMm(req.body.posting_window_start, 'Начало окна публикаций');
+      const end = requireHhMm(req.body.posting_window_end, 'Конец окна публикаций');
+      if (start >= end) throw new Error('Начало окна публикаций должно быть раньше конца');
+      const jitter = requireInt(req.body.slot_jitter_minutes, 0, 120, 'Разброс времени, минут');
+      const freshness = requireInt(req.body.freshness_window_days, 1, 3650, 'Окно свежести, дней');
+      const perDay = requireInt(req.body.default_posts_per_day, 0, 100, 'Постов в день');
+      await settings.set('posting_window_start', start);
+      await settings.set('posting_window_end', end);
+      await settings.set('slot_jitter_minutes', String(jitter));
+      await settings.set('freshness_window_days', String(freshness));
+      await settings.set('default_posts_per_day', String(perDay));
+      logger.info(
+        { окно: `${start}-${end}`, разброс: jitter, свежесть: freshness, постов_в_день: perDay,
+          кто: req.user.login },
+        `Настройки постинга изменены: окно ${start}-${end}, разброс ${jitter} мин`,
+      );
+      res.redirect(
+        `/settings?ok=${encodeURIComponent(`Окно публикаций ${start}-${end}, разброс ${jitter} мин`)}`,
+      );
+    } catch (error) {
+      logger.error(errFields(error), 'Сохранение настроек постинга упало');
       res.redirect(`/settings?err=${encodeURIComponent(error.message)}`);
     }
   });
@@ -1046,6 +1166,124 @@ export function panelRouter() {
         постинга - в разделе «Группы». ${syncButton}</p>`;
   }
 
+  /**
+   * Карточка прогона: план на следующий запуск, кнопка ручного запуска и итог последнего.
+   *
+   * План строится «на лету» из тех же правил, что использует сам прогон, — так видно,
+   * что уйдёт в какую группу и в какое время, до того как что-то опубликовано.
+   */
+  async function runCard(lastCycle) {
+    const plan = await buildPlan();
+    const planRows = plan.items.length
+      ? plan.items
+          .map(
+            (item) => `<tr>
+              <td>${item.slotNo}</td>
+              <td>${esc(item.groupName)}</td>
+              <td>${esc(item.label ?? '')}<br><span class="hint">${
+                item.kind === 'post' ? 'пост готов' : 'нужна генерация'
+              }${item.date ? ` · материал от ${esc(formatDate(item.date))}` : ''}</span></td>
+              <td class="hint">${esc(formatDate(item.postAt))}</td>
+            </tr>`,
+          )
+          .join('\n')
+      : `<tr><td colspan="4" class="empty">${esc(plan.reason ?? 'Планировать нечего')}</td></tr>`;
+
+    const quotas = plan.groups.length
+      ? plan.groups
+          .map(
+            (row) => `${esc(row.group.name)}: ${row.quota} из ${row.group.posts_per_day}` +
+              (row.publishedToday ? ` <span class="hint">(сегодня уже ${row.publishedToday})</span>` : ''),
+          )
+          .join(' · ')
+      : 'нет включённых групп';
+
+    const lastBlock = lastCycle
+      ? `<h2>Последний прогон</h2>
+         <div class="card">
+           <table>
+             <tr><th>Прогон</th><td>#${lastCycle.id} ${runKindText(lastCycle.kind)},
+               ${runStatusTag(lastCycle.status)}</td></tr>
+             <tr><th>Время</th><td>${esc(formatDate(lastCycle.started_at))} →
+               ${esc(formatDate(lastCycle.finished_at) || 'ещё идёт')}</td></tr>
+             <tr><th>Итог</th><td>слотов ${lastCycle.found}, сгенерировано
+               ${lastCycle.generated}, опубликовано ${lastCycle.published}</td></tr>
+             ${lastCycle.error
+               ? `<tr><th>Ошибки</th><td class="hint">${esc(lastCycle.error)}</td></tr>`
+               : ''}
+             <tr><th>request-id</th><td><code>${esc(lastCycle.request_id)}</code></td></tr>
+           </table>
+           ${await runItemsTable(lastCycle.id)}
+         </div>`
+      : '';
+
+    return `<div class="card">
+        <p style="margin:0 0 10px">Квоты на сегодня: ${quotas}</p>
+        <table>
+          <thead><tr><th>Слот</th><th>Группа</th><th>Материал</th><th>Время публикации</th></tr></thead>
+          <tbody>${planRows}</tbody>
+        </table>
+        <div style="margin-top:14px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <form method="post" action="/run" style="display:flex;gap:8px;align-items:center">
+            <label class="hint">не больше
+              <input type="number" name="limit_per_group" min="1" max="100" value=""
+                     placeholder="все" style="width:70px"> постов на группу</label>
+            <button type="submit"${plan.items.length ? '' : ' disabled'}>Запустить прогон</button>
+          </form>
+        </div>
+        <p class="hint" style="margin:10px 0 0">
+          Один материал уходит ровно в одну группу, порядок внутри группы - от свежих
+          к старым, времена разнесены по слотам внутри окна публикаций. Прогон делает
+          всю цепочку: текст, обложка, публикация. Второй запуск во время первого
+          отклоняется.${plan.reason && plan.items.length ? ` ${esc(plan.reason)}` : ''}
+        </p>
+      </div>
+      ${lastBlock}`;
+  }
+
+  /** Слоты прогона: что уехало, что нет, с временем и ошибкой. */
+  async function runItemsTable(runId) {
+    const items = await runs.listItems(runId);
+    if (items.length === 0) return '';
+    const rows = items
+      .map(
+        (item) => `<tr>
+          <td>${item.slot_no}</td>
+          <td>${esc(item.group_name)}</td>
+          <td>${item.post_id
+              ? `<a href="/posts/${item.post_id}">${esc(item.post_title ?? `пост #${item.post_id}`)}</a>`
+              : esc(item.topic_name ?? '(материал)')}</td>
+          <td class="hint">${esc(formatDate(item.post_at))}</td>
+          <td>${runItemTag(item)}</td>
+        </tr>`,
+      )
+      .join('\n');
+    return `<table style="margin-top:14px">
+        <thead><tr><th>Слот</th><th>Группа</th><th>Пост</th><th>Время</th><th>Состояние</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+  }
+
+  // Ручной запуск прогона. Синхронный: человек в панели ждёт результат, а cron
+  // с тем же вызовом появится на этапе 9.
+  router.post('/run', async (req, res) => {
+    try {
+      const raw = Number.parseInt(req.body.limit_per_group, 10);
+      const limitPerGroup = Number.isNaN(raw) ? undefined : raw;
+      const result = await runCycle({ kind: 'manual', limitPerGroup });
+      const summary =
+        `Прогон #${result.runId}${result.resumed ? ' (продолжен)' : ''}: опубликовано ` +
+        `${result.published} из ${result.planned}` +
+        (result.generated ? `, сгенерировано ${result.generated}` : '') +
+        (result.failed ? `, сбоев ${result.failed}` : '') +
+        `, ${Math.round(result.ms / 1000)} c`;
+      res.redirect(`/?ok=${encodeURIComponent(summary)}`);
+    } catch (error) {
+      logger.error(errFields(error), 'Прогон из панели упал');
+      res.redirect(`/?err=${encodeURIComponent(error.message)}`);
+    }
+  });
+
   /** Карточка промта: правка, история версий, откат. */
   async function promptCard(key, title, rows, hint) {
     const active = await prompts.getActive(key);
@@ -1130,12 +1368,6 @@ function stat(value, label) {
   return `<div class="card stat"><div class="n">${esc(value)}</div><div class="l">${esc(label)}</div></div>`;
 }
 
-function scheduleText(map) {
-  return map.schedule_mode === 'interval'
-    ? `каждые ${map.schedule_interval_hours} ч`
-    : `ежедневно в ${map.schedule_daily_at} МСК`;
-}
-
 /**
  * Состояние подключения аккаунта в postmypost. У ВК токен истекает (по брифу — раз
  * в три месяца), и клиент должен видеть это в списке, а не узнавать из сбоя постинга.
@@ -1147,6 +1379,44 @@ function connectionTag(group) {
   }
   return `<span class="tag off">отвалилась</span>
     <span class="hint">статус ${esc(group.connection_status)} — переподключите в postmypost</span>`;
+}
+
+/** Числовое поле формы с понятной ошибкой вместо «violates check constraint». */
+function requireInt(value, min, max, label) {
+  const number = Number.parseInt(String(value ?? '').trim(), 10);
+  if (Number.isNaN(number) || number < min || number > max) {
+    throw new Error(`${label}: нужно целое число от ${min} до ${max}`);
+  }
+  return number;
+}
+
+function requireHhMm(value, label) {
+  const text = String(value ?? '').trim();
+  if (!/^\d{1,2}:\d{2}$/.test(text)) throw new Error(`${label}: нужно время в формате ЧЧ:ММ`);
+  const [hours, minutes] = text.split(':').map((part) => Number.parseInt(part, 10));
+  if (hours > 23 || minutes > 59) throw new Error(`${label}: такого времени не существует`);
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+}
+
+function runKindText(kind) {
+  return { cron: 'по расписанию', manual: 'вручную', backfill: 'из архива',
+    source_check: 'проверка источника' }[kind] ?? kind;
+}
+
+function runStatusTag(status) {
+  if (status === 'done') return '<span class="tag on">завершён</span>';
+  if (status === 'failed') return '<span class="tag off">сбой</span>';
+  return '<span class="tag soon">идёт</span>';
+}
+
+function runItemTag(item) {
+  if (item.status === 'published') return '<span class="tag on">опубликован</span>';
+  if (item.status === 'failed') {
+    return `<span class="tag off">сбой</span> <span class="hint">${esc(item.error ?? '')}</span>`;
+  }
+  if (item.status === 'generated') return '<span class="tag soon">текст готов</span>';
+  if (item.status === 'skipped') return '<span class="tag off">пропущен</span>';
+  return '<span class="tag soon">в плане</span>';
 }
 
 function publishModeTag(mode) {
