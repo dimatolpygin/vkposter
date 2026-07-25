@@ -7,10 +7,15 @@ import * as settings from '../../repo/settings.js';
 import * as articles from '../../repo/articles.js';
 import * as prompts from '../../repo/prompts.js';
 import * as posts from '../../repo/posts.js';
+import * as groups from '../../repo/groups.js';
+import * as publications from '../../repo/publications.js';
 import { checkSource } from '../../services/check-source.js';
 import { generatePost } from '../../services/generate-post.js';
 import { generateImageForPost } from '../../services/generate-image.js';
+import { publishPost } from '../../services/publish-post.js';
+import { syncGroups } from '../../services/sync-groups.js';
 import * as kie from '../../lib/kie.js';
+import * as pmp from '../../lib/postmypost.js';
 import { log, errFields } from '../../logger.js';
 
 const logger = log('панель');
@@ -298,14 +303,30 @@ export function panelRouter() {
         )
         .join('\n');
 
+      const mode = await settings.get('publish_mode', 'draft');
       const body = `
+        <div class="card">
+          <h2 style="margin-top:0">Режим публикации</h2>
+          <p style="margin:0 0 10px">Сейчас: ${publishModeTag(mode)}</p>
+          <p class="hint" style="margin:0 0 12px">
+            В режиме «черновики» посты создаются в postmypost со статусом 4 и на стену
+            не уходят — их видно только в интерфейсе postmypost. «Реальная публикация»
+            ставит статус 5, и пост появляется в группе ВК в назначенное время.
+          </p>
+          <form method="post" action="/settings/publish-mode">
+            <input type="hidden" name="mode" value="${mode === 'live' ? 'draft' : 'live'}">
+            <button ${mode === 'live' ? 'class="ghost"' : ''} type="submit">${
+              mode === 'live' ? 'Вернуть режим черновиков' : 'Включить реальную публикацию'
+            }</button>
+          </form>
+        </div>
         <div class="card">
           <table>
             <thead><tr><th>Ключ</th><th>Значение</th><th>Изменено</th></tr></thead>
             <tbody>${rows}</tbody>
           </table>
         </div>
-        <h2>Редактирование</h2>
+        <h2>Редактирование остальных значений</h2>
         ${soon(8, 'Формы правки окна свежести, расписания и объёма постов — вместе с планировщиком.')}`;
 
       res.type('html').send(
@@ -314,12 +335,36 @@ export function panelRouter() {
           active: '/settings',
           user: req.user,
           heading: 'Настройки',
-          sub: 'Значения засеяны из брифа. Правка через панель появится на этапе 8.',
+          sub: 'Значения засеяны из брифа. Правка остальных ключей через панель появится на этапе 8.',
+          message: buildSourceMessage(req.query),
           body,
         }),
       );
     } catch (error) {
       next(error);
+    }
+  });
+
+  // Переключатель режима публикации. Отдельным роутом, а не общей формой настроек:
+  // это единственное значение, ошибка в котором видна подписчикам группы.
+  router.post('/settings/publish-mode', async (req, res) => {
+    try {
+      const mode = req.body.mode === 'live' ? 'live' : 'draft';
+      await settings.set('publish_mode', mode);
+      logger.warn(
+        { режим: mode, кто: req.user.login },
+        `Режим публикации переключён на «${mode === 'live' ? 'реальная публикация' : 'черновики'}»`,
+      );
+      res.redirect(
+        `/settings?ok=${encodeURIComponent(
+          mode === 'live'
+            ? 'Включена реальная публикация — посты будут уходить на стену группы'
+            : 'Включён режим черновиков',
+        )}`,
+      );
+    } catch (error) {
+      logger.error(errFields(error), 'Переключение режима публикации упало');
+      res.redirect(`/settings?err=${encodeURIComponent(error.message)}`);
     }
   });
 
@@ -384,6 +429,7 @@ export function panelRouter() {
       const totals = await posts.countAll();
       const nextArticle = await posts.nextArticleForGeneration();
       const nextWithoutImage = await posts.nextWithoutImage();
+      const nextToPublish = await posts.nextForPublishing();
 
       const rows = list.length
         ? list
@@ -416,6 +462,7 @@ export function panelRouter() {
           ${stat(totals.failed, 'Сбоев генерации')}
           ${stat(`$${Number(totals.cost).toFixed(4)}`, 'Израсходовано на текст')}
           ${stat(`${totals.with_image} из ${totals.total}`, 'С обложкой')}
+          ${stat(totals.published, 'Опубликовано')}
           ${stat(await creditsText(), 'Кредитов на kie.ai')}
         </div>
         ${nextWithoutImage
@@ -433,6 +480,14 @@ export function panelRouter() {
                  ? `<p class="hint" style="margin:10px 0 0">Прошлая попытка:
                     ${esc(nextWithoutImage.image_error)}</p>`
                  : ''}
+             </div>`
+          : ''}
+        ${nextToPublish
+          ? `<div class="card">
+               <h2 style="margin-top:0">Готов к публикации</h2>
+               <p style="margin:0 0 4px"><strong>#${nextToPublish.id}
+                 ${esc(nextToPublish.title)}</strong></p>
+               ${await publishForm(nextToPublish)}
              </div>`
           : ''}
         <div class="card">
@@ -515,6 +570,82 @@ export function panelRouter() {
     }
   });
 
+  // Синхронизация групп ВК из postmypost. Полноценный раздел «Группы» — этап 7.
+  router.post('/groups/sync', async (req, res) => {
+    const back = typeof req.body.back === 'string' && req.body.back.startsWith('/')
+      ? req.body.back
+      : '/posts';
+    try {
+      const result = await syncGroups();
+      const summary = `Групп ВК из postmypost: ${result.total} (новых ${result.added}` +
+        (result.broken ? `, отвалившихся ${result.broken}` : '') + ')';
+      res.redirect(`${back}?ok=${encodeURIComponent(summary)}`);
+    } catch (error) {
+      logger.error(errFields(error), 'Синхронизация групп из панели упала');
+      res.redirect(`${back}?err=${encodeURIComponent(error.message)}`);
+    }
+  });
+
+  // Публикация поста. Синхронная: заливка картинки и создание публикаций занимают
+  // секунды, человек в панели ждёт результат. Очередь появится с кроном на этапе 8.
+  router.post('/posts/:id/publish', async (req, res) => {
+    const id = Number.parseInt(req.params.id, 10);
+    try {
+      const post = await posts.findById(id);
+      if (!post) throw new Error(`Поста #${id} нет`);
+
+      const raw = req.body.group_ids;
+      const groupIds = (Array.isArray(raw) ? raw : [raw])
+        .filter(Boolean)
+        .map((value) => Number.parseInt(value, 10))
+        .filter((value) => !Number.isNaN(value));
+      if (groupIds.length === 0) throw new Error('Не выбрана ни одна группа');
+
+      const result = await publishPost(post, { groupIds });
+      const ok = result.published
+        .map((item) => `${item.group.name} → публикация ${item.publication.id}`)
+        .join('; ');
+      const bad = result.failed.map((item) => `${item.group.name}: ${item.error.message}`).join('; ');
+      const summary =
+        `${result.mode === 'live' ? 'Опубликовано' : 'Черновики созданы'} ` +
+        `(file_id ${result.fileId}${result.fileReused ? ', переиспользован' : ''}, ` +
+        `время ${result.postAt}): ${ok}` + (bad ? `. Не ушло — ${bad}` : '');
+      res.redirect(`/posts/${id}?ok=${encodeURIComponent(summary)}`);
+    } catch (error) {
+      logger.error({ пост: id, ...errFields(error) }, 'Публикация из панели упала');
+      res.redirect(`/posts/${id}?err=${encodeURIComponent(error.message)}`);
+    }
+  });
+
+  // Удаление публикации (в том числе черновика) — нужно для приёмки: черновик из UAT
+  // не должен оставаться в postmypost навсегда.
+  router.post('/publications/:id/delete', async (req, res) => {
+    const id = Number.parseInt(req.params.id, 10);
+    const postId = Number.parseInt(req.body.post_id, 10);
+    try {
+      const list = await publications.listByPost(postId);
+      // Number(): publications.id — bigserial, node-pg отдаёт его строкой, и строгое
+      // сравнение со числом из URL не сходится никогда.
+      const row = list.find((item) => Number(item.id) === id);
+      if (!row) throw new Error(`Публикации #${id} нет`);
+      if (!row.pmp_publication_id) throw new Error('У записи нет id публикации в postmypost');
+
+      const group = await groups.findById(row.group_id);
+      await pmp.deletePublication(row.pmp_publication_id, [group.pmp_account_id]);
+      await publications.remove(row.id);
+      // Пост держит статус «опубликован», пока у него есть хоть одна живая публикация.
+      if (!(await publications.hasSuccess(postId))) await posts.markReady(postId);
+      logger.info(
+        { публикация: row.pmp_publication_id, группа: group.name, кто: req.user.login },
+        `Публикация ${row.pmp_publication_id} удалена из postmypost`,
+      );
+      res.redirect(`/posts/${postId}?ok=${encodeURIComponent(`Публикация ${row.pmp_publication_id} удалена`)}`);
+    } catch (error) {
+      logger.error({ публикация: id, ...errFields(error) }, 'Удаление публикации упало');
+      res.redirect(`/posts/${postId}?err=${encodeURIComponent(error.message)}`);
+    }
+  });
+
   router.get('/posts/:id', async (req, res, next) => {
     try {
       const post = await posts.findById(Number.parseInt(req.params.id, 10));
@@ -573,6 +704,13 @@ export function panelRouter() {
           </form>
         </div>
         <div class="card">
+          <h2 style="margin-top:0">Публикация в ВК</h2>
+          ${await publicationsTable(post.id)}
+          ${post.image_url
+            ? await publishForm(post)
+            : '<p class="hint" style="margin:0">Публиковать нечего: у поста нет обложки.</p>'}
+        </div>
+        <div class="card">
           <h2 style="margin-top:0">${esc(post.title)}</h2>
           ${post.error ? `<p class="hint">Ошибка: ${esc(post.error)}</p>` : ''}
           <pre style="white-space:pre-wrap;font:inherit;margin:0">${esc(post.body)}</pre>
@@ -601,6 +739,83 @@ export function panelRouter() {
     ['/runs', 'Прогоны', 11, 'История запусков: найдено, сгенерировано, опубликовано, ошибки, request-id.'],
     ['/published', 'Опубликовано', 11, 'Лог постов: группа, тема, время, ссылка на пост в ВК, обложка.'],
   ];
+
+  /** Что уже уехало (или не уехало) по этому посту. */
+  async function publicationsTable(postId) {
+    const list = await publications.listByPost(postId);
+    if (list.length === 0) {
+      return '<p class="hint" style="margin:0 0 12px">Публикаций по этому посту ещё нет.</p>';
+    }
+    const rows = list
+      .map(
+        (item) => `<tr>
+          <td>${esc(item.group_name)}<br><span class="hint">${esc(item.group_login ?? '')}</span></td>
+          <td>${item.error
+              ? `<span class="tag off">сбой</span> <span class="hint">${esc(item.error)}</span>`
+              : `${publishModeTag(item.mode)} <span class="hint">статус ${esc(item.pmp_status ?? '—')}</span>`}</td>
+          <td><code>${esc(item.pmp_publication_id ?? '—')}</code>
+              <br><span class="hint">file_id ${esc(item.pmp_file_id ?? '—')}</span></td>
+          <td class="hint">${esc(formatDate(item.post_at))}</td>
+          <td>${item.pmp_publication_id
+              ? `<form class="inline" method="post" action="/publications/${item.id}/delete">
+                   <input type="hidden" name="post_id" value="${postId}">
+                   <button class="ghost small" type="submit">Удалить в postmypost</button>
+                 </form>`
+              : ''}</td>
+        </tr>`,
+      )
+      .join('\n');
+    return `<table style="margin-bottom:14px">
+        <thead><tr><th>Группа</th><th>Режим</th><th>ID в postmypost</th><th>Время</th><th></th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+  }
+
+  /**
+   * Форма публикации: выбор групп + кнопка. Группы синхронизируются из postmypost
+   * (раздел «Группы» с настройками появится на этапе 7, здесь — минимум для публикации).
+   */
+  async function publishForm(post) {
+    const list = await groups.listAll();
+    const mode = await settings.get('publish_mode', 'draft');
+    const syncButton = `<form class="inline" method="post" action="/groups/sync">
+        <input type="hidden" name="back" value="/posts/${post.id}">
+        <button class="ghost small" type="submit">Обновить список групп из postmypost</button>
+      </form>`;
+
+    if (list.length === 0) {
+      return `<p class="hint" style="margin:0 0 10px">
+          Групп в базе нет. Список берётся из postmypost: подключите группу ВК там
+          и нажмите кнопку ниже.</p>
+        ${syncButton}`;
+    }
+
+    const checks = list
+      .map((group) => {
+        const broken = group.connection_status !== null
+          && Number(group.connection_status) !== pmp.CONNECTION_OK;
+        return `<label style="display:block;margin-bottom:6px">
+            <input type="checkbox" name="group_ids" value="${group.id}"
+              ${broken ? '' : 'checked'}>
+            ${esc(group.name)}
+            <span class="hint">${esc(group.login ?? '')} · аккаунт ${group.pmp_account_id}${
+              broken ? ' · <span class="tag off">отключён</span>' : ''
+            }</span>
+          </label>`;
+      })
+      .join('\n');
+
+    return `<form method="post" action="/posts/${post.id}/publish">
+        <div style="margin:0 0 10px">${checks}</div>
+        <button type="submit">${
+          mode === 'live' ? 'Опубликовать на стену' : 'Создать черновик в postmypost'
+        }</button>
+        <span class="hint" style="margin-left:8px">режим: ${publishModeTag(mode)}</span>
+      </form>
+      <p class="hint" style="margin:10px 0 0">
+        Картинка заливается в postmypost один раз и переиспользуется всеми выбранными
+        группами. Режим переключается в разделе «Настройки». ${syncButton}</p>`;
+  }
 
   /** Карточка промта: правка, история версий, откат. */
   async function promptCard(key, title, rows, hint) {

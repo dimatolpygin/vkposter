@@ -93,6 +93,15 @@ export const config = {
     timeoutMs: envInt('KIE_TIMEOUT_MS', 60_000),
   },
 
+  postmypost: {
+    token: env('POSTMYPOST_TOKEN'),
+    projectId: envInt('POSTMYPOST_PROJECT_ID', 0),
+    // baseUrl вынесен по той же причине, что у kie.ai: в dev на него подставляется
+    // локальная заглушка (/_debug/pmp), чтобы гонять публикацию без реальных постов в ВК.
+    baseUrl: env('POSTMYPOST_BASE_URL', { fallback: 'https://api.postmypost.io/v4.1' }),
+    timeoutMs: envInt('POSTMYPOST_TIMEOUT_MS', 30_000),
+  },
+
   // Куда складываем обложки. Том media примонтирован сюда в обоих режимах compose.
   mediaDir: env('MEDIA_DIR', { fallback: '/app/media' }),
 

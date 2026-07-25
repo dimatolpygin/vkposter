@@ -65,3 +65,26 @@ export async function savePostImage({ postId, buffer, contentType, sourceUrl }) 
 export function mediaRoot() {
   return config.mediaDir;
 }
+
+/**
+ * Публичный адрес обложки поста — собирается из `PUBLIC_BASE_URL` и пути файла на диске,
+ * а не берётся из `posts.image_url` как есть.
+ *
+ * Зачем так: в `image_url` записан адрес на момент генерации. В dev это `localhost`,
+ * на проде — домен. Сборка на лету означает, что смена одной переменной (этап 12 или
+ * временный туннель для проверки) сразу лечит все уже сгенерированные посты, без UPDATE
+ * по таблице. `image_url` остаётся как след того, куда картинка отдавалась изначально.
+ */
+export function publicUrlFor(post) {
+  const base = config.publicBaseUrl.replace(/\/+$/, '');
+  const filePath = post?.image_path;
+  if (filePath) {
+    const relative = path.relative(config.mediaDir, filePath).split(path.sep).join('/');
+    // Файл вне mediaDir (path.relative начнётся с '..') — доверяем сохранённому URL.
+    if (relative && !relative.startsWith('..')) return `${base}/media/${relative}`;
+  }
+  if (!post?.image_url) return null;
+  // Запасной путь: подменяем только основу сохранённого адреса.
+  const tail = post.image_url.replace(/^https?:\/\/[^/]+/, '');
+  return `${base}${tail}`;
+}

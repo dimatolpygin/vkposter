@@ -219,6 +219,113 @@ export function debugRouter() {
     res.type('image/png').send(png);
   });
 
+  /**
+   * Заглушка postmypost: аккаунты, загрузка картинки, создание и удаление публикации.
+   *
+   * Зачем: живая проверка публикации создаёт настоящие черновики (а в режиме live —
+   * настоящие посты) в чужом проекте клиента, и «проверить обработку сбоя» там нельзя
+   * вообще никак. Подключается через
+   * POSTMYPOST_BASE_URL=http://127.0.0.1:3000/_debug/pmp
+   *
+   * Режим задаётся сегментом пути (клиент дописывает `/upload/init` к baseUrl):
+   *   .../_debug/pmp/badaccount/...  аккаунты отдают connection_status 0 (отвалились)
+   *   .../_debug/pmp/noaccounts/...  групп ВК в проекте нет
+   *   .../_debug/pmp/uploadfail/...  загрузка картинки завершается ошибкой (status 2)
+   *   .../_debug/pmp/slowupload/...  загрузка вечно в работе (проверка таймаута)
+   *   .../_debug/pmp/fail2/...       первые 2 запроса /upload/init отдают 503 (ретраи)
+   *   .../_debug/pmp/pubfail/...     создание публикации отдаёт 422 (сбой одной группы)
+   *   .../_debug/pmp/delete422/...   удаление отдаёт известный баг 422 при успехе
+   * Флаги сочетаются через дефис.
+   */
+  let pmpUploads = 0;
+  let pmpInitCalls = 0;
+  let pmpPublications = 0;
+  const pmpUploadState = new Map();
+
+  const pmpPath = (tail) => [`/_debug/pmp${tail}`, `/_debug/pmp/:flags${tail}`];
+  const pmpFlags = (req) => String(req.params.flags ?? '');
+
+  router.get(pmpPath('/accounts'), (req, res) => {
+    const flags = pmpFlags(req);
+    if (flags.includes('noaccounts')) return res.json([]);
+    const connection = flags.includes('badaccount') ? 0 : 1;
+    // Третий аккаунт — Telegram: проверяем, что фильтр по chanel_id = 2 работает
+    // и в группы ВК не попадает канал.
+    return res.json([
+      { id: 900001, chanel_id: 2, external_id: '-100001', name: 'Заглушка ВК первая',
+        login: 'stub_vk_1', connection_status: connection },
+      { id: 900002, chanel_id: 2, external_id: '-100002', name: 'Заглушка ВК вторая',
+        login: 'stub_vk_2', connection_status: connection },
+      { id: 900003, chanel_id: 6, external_id: '@stub', name: 'Заглушка Telegram',
+        login: 'stub_tg', connection_status: 1 },
+    ]);
+  });
+
+  router.post(pmpPath('/upload/init'), (req, res) => {
+    pmpInitCalls += 1;
+    const flags = pmpFlags(req);
+    const failFirst = Number.parseInt(flags.match(/fail(\d+)/)?.[1] ?? '0', 10);
+    if (pmpInitCalls <= failFirst) {
+      logger.warn({ вызов: pmpInitCalls }, 'Заглушка postmypost: отдаём 503 на upload/init');
+      return res.status(503).json([{ message: 'Заглушка: сервис недоступен' }]);
+    }
+    pmpUploads += 1;
+    const id = 13_000 + pmpUploads;
+    pmpUploadState.set(id, { polls: 0, flags });
+    logger.info(
+      { загрузка: id, url: req.body?.url, project_id: req.body?.project_id },
+      `Заглушка postmypost: загрузка ${id} начата`,
+    );
+    // Ответ — массив, как у живого API.
+    return res.json([{ id, url: req.body?.url, size: 204_331, status: 5 }]);
+  });
+
+  router.get(pmpPath('/upload/status'), (req, res) => {
+    const id = Number.parseInt(String(req.query.id ?? ''), 10);
+    const state = pmpUploadState.get(id);
+    if (!state) return res.status(404).json([{ message: `Загрузки ${id} нет` }]);
+
+    state.polls += 1;
+    if (state.flags.includes('uploadfail')) return res.json([{ id, status: 2 }]);
+    // Первый опрос всегда «в работе»: проверяем, что поллинг работает.
+    if (state.polls < 2 || state.flags.includes('slowupload')) return res.json([{ id, status: 5 }]);
+    return res.json([{ id, file_id: 50_000_000 + id, status: 1 }]);
+  });
+
+  router.post(pmpPath('/publications'), (req, res) => {
+    const flags = pmpFlags(req);
+    if (flags.includes('pubfail')) {
+      return res.status(422).json([{ message: 'Заглушка: публикация не создана' }]);
+    }
+    pmpPublications += 1;
+    const id = 30_800_000 + pmpPublications;
+    logger.info(
+      {
+        публикация: id,
+        аккаунты: req.body?.account_ids,
+        статус: req.body?.publication_status,
+        post_at: req.body?.post_at,
+        файлы: req.body?.details?.[0]?.file_ids,
+        символов: String(req.body?.details?.[0]?.content ?? '').length,
+      },
+      `Заглушка postmypost: публикация ${id} создана`,
+    );
+    return res.json([{
+      id,
+      publication_status: req.body?.publication_status,
+      post_at: req.body?.post_at,
+      account_ids: req.body?.account_ids,
+    }]);
+  });
+
+  router.delete(pmpPath('/publications/:id'), (req, res) => {
+    if (pmpFlags(req).includes('delete422')) {
+      // Тот самый баг живого API: 422 на валидации ответа, хотя удаление прошло.
+      return res.status(422).json([{ message: 'Response validation error: publication_status' }]);
+    }
+    return res.json([{ id: Number.parseInt(req.params.id, 10), deleted: true }]);
+  });
+
   // GET /_debug/boom — необработанное исключение внутри обработчика (проверка error-handler).
   router.get('/_debug/boom', () => {
     throw new Error('Искусственная ошибка для проверки обработчика');

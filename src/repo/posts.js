@@ -113,6 +113,49 @@ export async function nextWithoutImage() {
   return rows[0] ?? null;
 }
 
+/**
+ * Пост уехал в группу. Заодно материал помечается использованным: тема с готовым постом
+ * и так не попадает в очередь (см. nextArticleForGeneration), но статус материала должен
+ * это отражать — иначе в панели он выглядит «ждёт своей очереди».
+ */
+export async function markPublished(postId) {
+  const { rows } = await query(
+    `UPDATE posts SET status = 'published', published_at = now()
+      WHERE id = $1
+      RETURNING *`,
+    [postId],
+  );
+  const post = rows[0] ?? null;
+  if (post?.article_id) {
+    await query(`UPDATE articles SET status = 'used' WHERE id = $1`, [post.article_id]);
+  }
+  return post;
+}
+
+/** Откат статуса: последняя публикация поста удалена, значит он снова просто готов. */
+export async function markReady(postId) {
+  const { rows } = await query(
+    `UPDATE posts SET status = 'ready', published_at = NULL WHERE id = $1 RETURNING *`,
+    [postId],
+  );
+  return rows[0] ?? null;
+}
+
+/** Готовый пост с обложкой, который ещё никуда не публиковался (кнопка в панели, cron на этапе 8). */
+export async function nextForPublishing() {
+  const { rows } = await query(
+    `SELECT p.*, a.topic_name
+       FROM posts p
+       LEFT JOIN articles a ON a.id = p.article_id
+      WHERE p.status = 'ready' AND p.image_url IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM publications pub
+                         WHERE pub.post_id = p.id AND pub.error IS NULL)
+      ORDER BY p.id ASC
+      LIMIT 1`,
+  );
+  return rows[0] ?? null;
+}
+
 export async function listRecent(limit = 30) {
   const { rows } = await query(
     `SELECT p.id, p.title, p.char_count, p.status, p.model, p.provider, p.cost_usd,
@@ -172,6 +215,7 @@ export async function countAll() {
     `SELECT count(*)::int AS total,
             count(*) FILTER (WHERE status = 'failed')::int AS failed,
             count(*) FILTER (WHERE image_path IS NOT NULL)::int AS with_image,
+            count(*) FILTER (WHERE status = 'published')::int AS published,
             COALESCE(sum(image_credits), 0)::int AS image_credits,
             COALESCE(sum(cost_usd), 0)::numeric AS cost
        FROM posts`,

@@ -56,6 +56,7 @@ services:
       POSTMYPOST_BASE_URL: ${POSTMYPOST_BASE_URL:-https://api.postmypost.io/v4.1}
       POSTMYPOST_TOKEN: ${POSTMYPOST_TOKEN:-}
       POSTMYPOST_PROJECT_ID: ${POSTMYPOST_PROJECT_ID:-}
+      POSTMYPOST_TIMEOUT_MS: ${POSTMYPOST_TIMEOUT_MS:-30000}
       TZ: Europe/Moscow
     ports:
       - "${APP_PORT:-3000}:3000"
