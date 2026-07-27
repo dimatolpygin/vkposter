@@ -21,6 +21,7 @@ const NAV = [
   { href: '/settings', title: 'Настройки' },
   { href: '/prompts', title: 'Промты' },
   { href: '/manual', title: 'Ручной режим' },
+  { href: '/archive', title: 'Из архива' },
   { href: '/runs', title: 'Прогоны' },
   { href: '/published', title: 'Опубликовано' },
 ];
@@ -69,7 +70,7 @@ const STYLES = `
   .tag.soon { background: var(--warn-weak); color: var(--warn); }
   form.inline { display: inline; }
   label { display: block; margin-bottom: 5px; font-size: 13px; color: var(--muted); }
-  input[type=text], input[type=password], input[type=number], select, textarea {
+  input[type=text], input[type=password], input[type=number], input[type=date], select, textarea {
     width: 100%; padding: 9px 11px; border: 1px solid var(--line); border-radius: 6px;
     font: inherit; background: #fff; color: var(--text); }
   input:focus, textarea:focus, select:focus { outline: 2px solid var(--accent-weak);

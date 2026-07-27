@@ -242,6 +242,86 @@ export async function listArticlesForGeneration(limit, excludeArticleIds = []) {
   return rows;
 }
 
+/**
+ * Кандидаты наполнения из архива: то же, что и в обычном плане, но с двумя фильтрами —
+ * выбранные источники и период материала.
+ *
+ * Дедуп здесь не свой, а общий: материал не берётся, если по его теме уже есть пост
+ * (`NOT EXISTS ... posts`), если он занят чужим планом (`excludeArticleIds` из
+ * `run_items`), а готовый пост — если он уже опубликован. Ровно поэтому «уже
+ * опубликованные ранее материалы в очередь не попадают» — правило одно на систему.
+ *
+ * @param {object} options
+ * @param {number[]} options.sourceIds выбранные источники
+ * @param {string} options.from дата «с», YYYY-MM-DD
+ * @param {string} options.to дата «по», YYYY-MM-DD (включительно)
+ * @param {number} options.limit сколько нужно
+ * @param {number[]} [options.excludeArticleIds] материалы, занятые другим планом
+ * @returns {Promise<Array<{kind: 'post'|'article', postId: number|null, articleId: number,
+ *   date: Date, label: string}>>} от свежих к старым
+ */
+export async function listArchiveCandidates({
+  sourceIds, from, to, limit, excludeArticleIds = [],
+}) {
+  const params = [sourceIds, from, to, limit, excludeArticleIds];
+
+  const ready = await query(
+    `SELECT p.id, p.title, p.article_id, p.image_url,
+            COALESCE(a.published_at, a.lastmod) AS article_date, a.topic_name
+       FROM posts p
+       JOIN articles a ON a.id = p.article_id
+      WHERE p.status = 'ready'
+        AND a.source_id = ANY($1::int[])
+        AND (COALESCE(a.published_at, a.lastmod) AT TIME ZONE 'Europe/Moscow')::date
+            BETWEEN $2::date AND $3::date
+        AND NOT EXISTS (SELECT 1 FROM publications pub
+                         WHERE pub.post_id = p.id AND pub.error IS NULL
+                           AND pub.pmp_publication_id IS NOT NULL)
+        AND NOT (p.article_id = ANY($5::bigint[]))
+      ORDER BY COALESCE(a.published_at, a.lastmod) DESC NULLS LAST, p.id ASC
+      LIMIT $4`,
+    params,
+  );
+
+  const fresh = await query(
+    `SELECT a.id, a.url, a.title, a.topic_name,
+            COALESCE(a.published_at, a.lastmod) AS article_date
+       FROM articles a
+       JOIN sources s ON s.id = a.source_id
+      WHERE a.status IN ('new', 'fetched')
+        AND a.source_id = ANY($1::int[])
+        AND a.topic_key IS NOT NULL
+        AND (COALESCE(a.published_at, a.lastmod) AT TIME ZONE 'Europe/Moscow')::date
+            BETWEEN $2::date AND $3::date
+        AND NOT EXISTS (SELECT 1 FROM posts p
+                         WHERE p.topic_key = a.topic_key AND p.status <> 'failed')
+        AND (s.content_mode = 'topic_only' OR a.content IS NOT NULL)
+        AND NOT (a.id = ANY($5::bigint[]))
+      ORDER BY COALESCE(a.published_at, a.lastmod) DESC NULLS LAST, a.id DESC
+      LIMIT $4`,
+    params,
+  );
+
+  return [
+    ...ready.rows.map((row) => ({
+      kind: 'post',
+      postId: Number(row.id),
+      articleId: Number(row.article_id),
+      date: row.article_date,
+      label: row.topic_name ?? row.title,
+    })),
+    ...fresh.rows.map((row) => ({
+      kind: 'article',
+      postId: null,
+      articleId: Number(row.id),
+      date: row.article_date,
+      label: row.topic_name ?? row.title ?? row.url,
+    })),
+  ]
+    .sort((a, b) => new Date(b.date ?? 0).getTime() - new Date(a.date ?? 0).getTime())
+    .slice(0, limit);
+}
+
 export async function findArticleForGeneration(articleId) {
   const { rows } = await query(
     `SELECT a.id, a.url, a.title, a.content, a.topic_key, a.topic_name,

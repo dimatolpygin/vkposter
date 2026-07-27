@@ -6,6 +6,7 @@ import { runMigrations } from './db/migrate.js';
 import { runSeeds } from './bootstrap/seed.js';
 import { createApp } from './http/app.js';
 import { startScheduler, stopScheduler } from './services/scheduler.js';
+import { resumeArchiveFill } from './services/archive-fill.js';
 
 const startupLog = log('запуск');
 
@@ -50,6 +51,13 @@ async function main() {
   // а не в момент, когда порт ещё не открыт. Сам он ничего не делает, пока
   // `schedule_enabled` в настройках не переведён в `on`.
   startScheduler();
+
+  // Наполнение из архива живёт днями и переживает рестарт: незаконченное задание
+  // подхватывается с того слота, где встало. Иначе оно навсегда осталось бы в статусе
+  // «выполняется» и блокировало запуск нового.
+  await resumeArchiveFill().catch((error) =>
+    startupLog.error(errFields(error), 'Не удалось подхватить задание наполнения'),
+  );
 
   setupShutdown(server);
 }

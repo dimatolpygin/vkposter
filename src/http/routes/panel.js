@@ -20,6 +20,7 @@ import { publishPost } from '../../services/publish-post.js';
 import { syncGroups } from '../../services/sync-groups.js';
 import { createManualPost, inspect as inspectManual } from '../../services/manual-post.js';
 import { schedulerState } from '../../services/scheduler.js';
+import { archiveState, startArchiveFill, stopArchiveFill } from '../../services/archive-fill.js';
 import * as kie from '../../lib/kie.js';
 import * as pmp from '../../lib/postmypost.js';
 import { log, errFields } from '../../logger.js';
@@ -1293,6 +1294,191 @@ export function panelRouter() {
     }
   });
 
+  // ── Наполнение из архива ─────────────────────────────────────────────────
+  router.get('/archive', async (req, res, next) => {
+    try {
+      const [state, sourceList, groupList, map] = await Promise.all([
+        archiveState(),
+        sources.listAll(),
+        groups.listAll(),
+        settings.getMap(),
+      ]);
+
+      const activeSources = sourceList.filter((item) => item.is_active && item.code !== 'manual');
+      const activeGroups = groupList.filter((item) => item.is_active && !item.deleted_at);
+
+      const sourceChecks = activeSources.length
+        ? activeSources
+            .map((item) => `<label style="display:block;margin-bottom:6px">
+              <input type="checkbox" name="source_ids" value="${item.id}" checked>
+              ${esc(item.title)} <span class="hint">${esc(item.code)} · ${
+                esc(discoveryText(item))}</span></label>`)
+            .join('\n')
+        : '<p class="hint">Активных источников нет — включите их в разделе «Источники».</p>';
+
+      const groupChecks = activeGroups.length
+        ? activeGroups
+            .map((item) => `<label style="display:block;margin-bottom:6px">
+              <input type="checkbox" name="group_ids" value="${item.id}" checked>
+              ${esc(item.name)} <span class="hint">до ${item.posts_per_day} постов в день · ${
+                esc(item.login ?? '')}</span></label>`)
+            .join('\n')
+        : '<p class="hint">Включённых групп нет — включите группу в разделе «Группы».</p>';
+
+      // Период по умолчанию: год до начала окна свежести. Свежее окно и так забирает
+      // обычный обход, наполнению нужен именно архив «до» него.
+      const freshDays = Number.parseInt(map.freshness_window_days ?? '30', 10) || 30;
+      const to = new Date(Date.now() - freshDays * 86_400_000);
+      const from = new Date(to.getTime() - 365 * 86_400_000);
+      const iso = (date) => date.toISOString().slice(0, 10);
+
+      const busy = state.active;
+      const form = `<div class="card">
+          <h2 style="margin-top:0">Новое наполнение</h2>
+          <p class="hint" style="margin:0 0 12px">
+            Система соберёт материалы выбранных источников за период, отбросит те, по которым
+            пост уже был, и разложит очередь от свежих к старым: каждый день — не больше
+            заданного числа постов на группу. Публикации создаются сразу, но встают
+            в postmypost на свои даты, поэтому стена наполняется постепенно.
+          </p>
+          <form method="post" action="/archive">
+            <div style="display:flex;gap:30px;flex-wrap:wrap">
+              <div style="min-width:260px"><b>Источники</b><div style="margin-top:8px">${
+                sourceChecks}</div></div>
+              <div style="min-width:260px"><b>Группы</b><div style="margin-top:8px">${
+                groupChecks}</div></div>
+              <div style="min-width:220px">
+                <b>Период и объём</b>
+                <div style="margin-top:8px;display:flex;flex-direction:column;gap:8px">
+                  <label>с<br><input type="date" name="from" value="${iso(from)}"></label>
+                  <label>по<br><input type="date" name="to" value="${iso(to)}"></label>
+                  <label>всего постов<br>
+                    <input type="number" name="limit_total" min="1" max="500" value="30"></label>
+                  <label>в день на группу<br>
+                    <input type="number" name="per_day" min="1" max="100" value="${
+                      esc(map.default_posts_per_day ?? '3')}"></label>
+                </div>
+              </div>
+            </div>
+            <div style="margin-top:14px">
+              <button type="submit"${busy ? ' disabled' : ''}>${
+                busy ? 'Задание уже выполняется' : 'Поставить в очередь'}</button>
+              <span class="hint" style="margin-left:8px">сбор материалов занимает
+                несколько минут, затем задание публикует посты по одному</span>
+            </div>
+          </form>
+        </div>`;
+
+      const body = `${form}
+        ${busy ? await archiveCard(busy) : ''}
+        <h2>История наполнений</h2>
+        <div class="card">
+          <table>
+            <thead><tr><th>Задание</th><th>Период</th><th>Итог</th><th>Начато</th></tr></thead>
+            <tbody>${
+              state.recent.length
+                ? state.recent
+                    .map((job) => `<tr>
+                      <td>#${job.id} ${archiveStatusTag(job.status)}</td>
+                      <td class="hint">${esc(formatDay(job.period_from))} - ${
+                        esc(formatDay(job.period_to))}</td>
+                      <td class="hint">в очереди ${job.planned}, опубликовано ${
+                        job.published}${job.failed ? `, сбоев ${job.failed}` : ''}</td>
+                      <td class="hint">${esc(formatDate(job.started_at))}</td>
+                    </tr>`)
+                    .join('\n')
+                : '<tr><td colspan="4" class="empty">Наполнений ещё не было</td></tr>'
+            }</tbody>
+          </table>
+        </div>`;
+
+      res.type('html').send(
+        page({
+          title: 'Из архива',
+          active: '/archive',
+          user: req.user,
+          heading: 'Наполнение из архива',
+          sub: 'Разовый старт: посты за прошлый период, растянутые по дням.',
+          message: buildSourceMessage(req.query),
+          body,
+        }),
+      );
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.post('/archive', async (req, res) => {
+    try {
+      const job = await startArchiveFill({
+        sourceIds: idList(req.body.source_ids),
+        groupIds: idList(req.body.group_ids),
+        from: String(req.body.from ?? '').trim(),
+        to: String(req.body.to ?? '').trim(),
+        limitTotal: requireInt(req.body.limit_total, 1, 500, 'Всего постов'),
+        perDay: requireInt(req.body.per_day, 1, 100, 'Постов в день на группу'),
+        createdBy: req.user.login,
+      });
+      logger.info({ задание: job.id, кто: req.user.login }, `Наполнение #${job.id} поставлено в очередь`);
+      res.redirect(
+        `/archive?ok=${encodeURIComponent(
+          `Задание #${job.id} принято. Сначала сбор материалов, потом публикация — ` +
+            'обновляйте страницу, прогресс виден ниже.',
+        )}`,
+      );
+    } catch (error) {
+      logger.error(errFields(error), 'Наполнение из архива не запустилось');
+      res.redirect(`/archive?err=${encodeURIComponent(error.message)}`);
+    }
+  });
+
+  router.post('/archive/:id/stop', async (req, res) => {
+    try {
+      const id = Number.parseInt(req.params.id, 10);
+      await stopArchiveFill(id);
+      res.redirect(
+        `/archive?ok=${encodeURIComponent(
+          'Задание останавливается: слот, который уже начат, доедет, остальные не публикуются.',
+        )}`,
+      );
+    } catch (error) {
+      res.redirect(`/archive?err=${encodeURIComponent(error.message)}`);
+    }
+  });
+
+  /** Карточка активного задания: этап, счётчики, слоты, кнопка «Остановить». */
+  async function archiveCard(job) {
+    const progress = job.planned
+      ? `${job.published} из ${job.planned}`
+      : `собрано материалов: ${job.collected}`;
+    return `<div class="card">
+        <h2 style="margin-top:0">Задание #${job.id} ${archiveStatusTag(job.status)}</h2>
+        <table>
+          <tr><th>Этап</th><td>${esc(job.stage ?? '')}</td></tr>
+          <tr><th>Период</th><td>${esc(formatDay(job.period_from))} - ${
+            esc(formatDay(job.period_to))}</td></tr>
+          <tr><th>Объём</th><td>до ${job.limit_total} постов, ${job.per_day} в день на группу${
+            job.days ? `, растянуто на ${job.days} дн.` : ''}</td></tr>
+          <tr><th>Прогресс</th><td>${esc(progress)}${
+            job.generated ? `, сгенерировано ${job.generated}` : ''}${
+            job.failed ? `, сбоев ${job.failed}` : ''}</td></tr>
+          <tr><th>Начато</th><td>${esc(formatDate(job.started_at))} ${
+            esc(job.created_by ? `· ${job.created_by}` : '')}</td></tr>
+          <tr><th>request-id</th><td><code>${esc(job.request_id ?? '')}</code></td></tr>
+        </table>
+        <p class="hint" style="margin:12px 0 0">
+          Страница сама не обновляется - нажмите F5. Вкладку можно закрыть, задание
+          от этого не остановится.
+        </p>
+        <form method="post" action="/archive/${job.id}/stop" style="margin-top:12px">
+          <button class="ghost" type="submit">Остановить</button>
+          <span class="hint" style="margin-left:8px">уже созданные посты останутся в базе,
+            неопубликованные слоты будут сняты</span>
+        </form>
+        ${job.run_id ? await runItemsTable(job.run_id) : ''}
+      </div>`;
+  }
+
   // ── Разделы будущих этапов ───────────────────────────────────────────────
   const stubs = [
     ['/runs', 'Прогоны', 11, 'История запусков: найдено, сгенерировано, опубликовано, ошибки, request-id.'],
@@ -1677,9 +1863,26 @@ function requireHhMm(value, label) {
   return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
 }
 
+/** Список id из чекбоксов формы: одна галочка приходит строкой, несколько — массивом. */
+function idList(value) {
+  const raw = Array.isArray(value) ? value : (value === undefined ? [] : [value]);
+  return raw
+    .map((item) => Number.parseInt(String(item), 10))
+    .filter((item) => Number.isInteger(item));
+}
+
 function runKindText(kind) {
-  return { cron: 'по расписанию', manual: 'вручную', backfill: 'из архива',
-    source_check: 'проверка источника' }[kind] ?? kind;
+  return { cron: 'по расписанию', manual: 'вручную', backfill: 'добор материалов',
+    source_check: 'проверка источника', archive: 'наполнение из архива' }[kind] ?? kind;
+}
+
+function archiveStatusTag(status) {
+  if (status === 'done') return '<span class="tag on">завершено</span>';
+  if (status === 'failed') return '<span class="tag off">сбой</span>';
+  if (status === 'stopped') return '<span class="tag off">остановлено</span>';
+  if (status === 'stopping') return '<span class="tag soon">останавливается</span>';
+  if (status === 'collecting') return '<span class="tag soon">сбор материалов</span>';
+  return '<span class="tag soon">публикует</span>';
 }
 
 function runStatusTag(status) {
@@ -1765,4 +1968,10 @@ function buildSourceMessage(q) {
 function formatDate(value) {
   if (!value) return '';
   return new Date(value).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' });
+}
+
+/** Только дата: у периода наполнения времени нет, и «00:00:00» в нём выглядит мусором. */
+function formatDay(value) {
+  if (!value) return '';
+  return new Date(value).toLocaleDateString('ru-RU', { timeZone: 'Europe/Moscow' });
 }

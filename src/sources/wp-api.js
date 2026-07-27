@@ -45,31 +45,59 @@ function decodeTitle(html) {
   return stripHtml(html).replace(/\s+/g, ' ').trim();
 }
 
-/** Список свежих записей: обнаружение для источников без рабочего sitemap. */
-export async function discoverViaWpApi(source, { since, limit }) {
-  const url =
-    `${apiBase(source)}/posts?per_page=${Math.min(limit, 100)}` +
-    `&after=${encodeURIComponent(since.toISOString())}` +
-    '&orderby=date&order=desc&_fields=id,date_gmt,link,title';
+/**
+ * Список записей за период: обнаружение для источников без рабочего sitemap.
+ *
+ * `before` появляется только когда задана верхняя граница (наполнение из архива).
+ * Без него у активного сайта первые 100 записей — всегда последние дни, и запрос
+ * за прошлый год возвращал бы ровно то же, что и обычный обход.
+ */
+export async function discoverViaWpApi(source, { since, until = null, limit }) {
+  const perPage = Math.min(limit, 100);
+  const found = [];
 
-  const posts = await request(url, {
-    label: `wp-api:${source.code}`,
-    headers: { 'User-Agent': config.userAgent, Accept: 'application/json' },
-    timeoutMs: 30_000,
-    retries: 2,
-  });
+  // Страницы нужны только наполнению из архива: обычный обход укладывается в первую
+  // (лимит источника 50). WP отвечает 400 на страницу за пределами выборки — это
+  // не ошибка обхода, а сигнал «записи кончились».
+  for (let page = 1; found.length < limit && page <= 10; page += 1) {
+    const url =
+      `${apiBase(source)}/posts?per_page=${perPage}&page=${page}` +
+      `&after=${encodeURIComponent(since.toISOString())}` +
+      (until ? `&before=${encodeURIComponent(new Date(until).toISOString())}` : '') +
+      '&orderby=date&order=desc&_fields=id,date_gmt,link,title';
 
-  if (!Array.isArray(posts)) {
-    logger.warn({ источник: source.code }, 'WP API вернул неожиданный ответ вместо массива записей');
-    return [];
+    let posts;
+    try {
+      posts = await request(url, {
+        label: `wp-api:${source.code}`,
+        headers: { 'User-Agent': config.userAgent, Accept: 'application/json' },
+        timeoutMs: 30_000,
+        retries: 2,
+      });
+    } catch (error) {
+      if (page === 1) throw error;
+      logger.debug(
+        { источник: source.code, страница: page, message: error.message },
+        `${source.code}: страница ${page} не отдалась — считаем, что записи кончились`,
+      );
+      break;
+    }
+
+    if (!Array.isArray(posts)) {
+      logger.warn({ источник: source.code }, 'WP API вернул неожиданный ответ вместо массива записей');
+      break;
+    }
+    found.push(...posts);
+    if (posts.length < perPage) break;
   }
 
   logger.info(
-    { источник: source.code, записей: posts.length },
-    `${source.code}: WP API отдал ${posts.length} свежих записей`,
+    { источник: source.code, записей: found.length, до: until ? new Date(until).toISOString().slice(0, 10) : null },
+    `${source.code}: WP API отдал ${found.length} записей` +
+      (until ? ` за период до ${new Date(until).toISOString().slice(0, 10)}` : ' (свежие)'),
   );
 
-  return posts.map((post) => ({
+  return found.slice(0, limit).map((post) => ({
     url: post.link,
     lastmod: post.date_gmt ? new Date(`${post.date_gmt}Z`) : null,
     title: decodeTitle(post.title?.rendered ?? ''),

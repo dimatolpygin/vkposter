@@ -53,7 +53,7 @@ export async function listAll() {
               WHERE p.group_id = g.id
                 AND p.error IS NULL
                 AND p.pmp_publication_id IS NOT NULL
-                AND (p.created_at AT TIME ZONE 'Europe/Moscow')::date
+                AND (COALESCE(p.post_at, p.created_at) AT TIME ZONE 'Europe/Moscow')::date
                     = (now() AT TIME ZONE 'Europe/Moscow')::date)::int AS published_today
        FROM groups g
       WHERE g.deleted_at IS NULL
@@ -152,21 +152,58 @@ export async function restore(id) {
   return rows[0] ?? null;
 }
 
+/** «2026-07-27» из Date — день считаем по местному времени, оно же МСК. */
+function dayKey(value) {
+  const date = value ? new Date(value) : new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
 /**
- * Сколько постов уже уехало в группу сегодня (МСК) — база дневного лимита.
+ * Сколько постов встанет в группу в этот день (МСК) — база дневного лимита.
+ *
+ * Считается по `post_at`, а не по времени создания записи. Разница видна только на
+ * наполнении из архива (этап 10): оно создаёт сразу все публикации, но расписывает их
+ * `post_at` на неделю вперёд. По времени создания лимит «10 в день» был бы исчерпан
+ * первым же заданием, хотя на стене в этот день выходит ровно столько, сколько положено.
  * Считаются только успешные публикации: сбой лимит не расходует.
  */
-export async function publishedToday(id) {
+export async function publishedOn(id, when = null) {
   const { rows } = await query(
     `SELECT count(*)::int AS n FROM publications
       WHERE group_id = $1
         AND error IS NULL
         AND pmp_publication_id IS NOT NULL
-        AND (created_at AT TIME ZONE 'Europe/Moscow')::date
-            = (now() AT TIME ZONE 'Europe/Moscow')::date`,
-    [id],
+        AND (COALESCE(post_at, created_at) AT TIME ZONE 'Europe/Moscow')::date = $2::date`,
+    [id, dayKey(when)],
   );
   return rows[0].n;
+}
+
+export async function publishedToday(id) {
+  return publishedOn(id, null);
+}
+
+/**
+ * Занято в группе на этот день: уже опубликованное плюс слоты чужих планов
+ * (незаконченный прогон, другое задание наполнения). Нужно планировщику наполнения —
+ * иначе два задания подряд расписали бы на один и тот же день двойную норму.
+ */
+export async function scheduledOn(id, when) {
+  const day = dayKey(when);
+  const { rows } = await query(
+    `SELECT
+       (SELECT count(*) FROM publications
+         WHERE group_id = $1 AND error IS NULL AND pmp_publication_id IS NOT NULL
+           AND (COALESCE(post_at, created_at) AT TIME ZONE 'Europe/Moscow')::date = $2::date)
+       +
+       (SELECT count(*) FROM run_items i
+         WHERE i.group_id = $1 AND i.status IN ('planned', 'generated')
+           AND (i.post_at AT TIME ZONE 'Europe/Moscow')::date = $2::date)
+       AS n`,
+    [id, day],
+  );
+  return Number(rows[0].n);
 }
 
 export async function countAll() {

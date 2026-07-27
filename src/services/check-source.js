@@ -69,11 +69,22 @@ export async function extractOne(source, article) {
 /**
  * @param {object} source строка sources
  * @param {object} [options]
- * @param {'source_check'|'backfill'} [options.kind] чем инициирована проверка
+ * @param {'source_check'|'backfill'|'archive'} [options.kind] чем инициирована проверка
  * @param {Date} [options.since] окно обнаружения; по умолчанию — `freshness_window_days`.
  *   Добор (этап 9) передаёт более раннюю дату, чтобы дочерпать архив, не трогая настройку.
+ * @param {Date} [options.until] верхняя граница периода. Только наполнение из архива
+ *   (этап 10): без неё активный сайт отдаёт свои свежие материалы вместо архивных.
+ * @param {number} [options.discoveryLimit] сколько адресов забрать за раз (иначе настройка)
+ * @param {number} [options.extractLimit] сколько текстов извлечь за раз (иначе настройка).
+ *   Наполнение поднимает оба потолка: ему нужен не «свежий срез», а весь период.
  */
-export async function checkSource(source, { kind = 'source_check', since: sinceOverride } = {}) {
+export async function checkSource(source, {
+  kind = 'source_check',
+  since: sinceOverride,
+  until = null,
+  discoveryLimit: discoveryLimitOverride,
+  extractLimit: extractLimitOverride,
+} = {}) {
   const requestId = getRequestId() ?? 'no-rid';
   const runId = await runs.startRun({ requestId, kind, meta: { source: source.code } });
   extendContext({ runId });
@@ -96,15 +107,23 @@ export async function checkSource(source, { kind = 'source_check', since: sinceO
   try {
     return await withSourceLock(source.id, async () => {
       const since = sinceOverride ?? (await freshnessCutoff());
-      const discoveryLimit = await settings.getInt('discovery_limit_per_source', 50);
-      const extractLimit = await settings.getInt('extract_limit_per_check', 10);
+      const discoveryLimit = discoveryLimitOverride
+        ?? (await settings.getInt('discovery_limit_per_source', 50));
+      const extractLimit = extractLimitOverride
+        ?? (await settings.getInt('extract_limit_per_check', 10));
 
       logger.info(
-        { источник: source.code, окно_с: since.toISOString().slice(0, 10), лимит: discoveryLimit },
-        `Проверяем источник ${source.code}, окно свежести с ${since.toISOString().slice(0, 10)}`,
+        {
+          источник: source.code,
+          окно_с: since.toISOString().slice(0, 10),
+          окно_по: until ? new Date(until).toISOString().slice(0, 10) : null,
+          лимит: discoveryLimit,
+        },
+        `Проверяем источник ${source.code}, период с ${since.toISOString().slice(0, 10)}` +
+          (until ? ` по ${new Date(until).toISOString().slice(0, 10)}` : ''),
       );
 
-      const candidates = await discoverSource(source, { since, limit: discoveryLimit });
+      const candidates = await discoverSource(source, { since, until, limit: discoveryLimit });
       stats.discovered = candidates.length;
 
       for (const candidate of candidates) {

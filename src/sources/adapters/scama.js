@@ -31,7 +31,7 @@ function parseShortDate(value) {
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
-export async function discover(source, { since, limit }) {
+export async function discover(source, { since, until = null, limit }) {
   const checkUrl = `${source.base_url.replace(/\/$/, '')}/check`;
   const { markdown } = await scrape(checkUrl, { onlyMainContent: true });
 
@@ -45,6 +45,7 @@ export async function discover(source, { since, limit }) {
 
     const date = parseShortDate(dateB) ?? parseShortDate(dateA);
     if (date && date < since) continue;
+    if (date && until && date > until) continue;
     if (seen.has(domain)) continue;
     seen.add(domain);
 

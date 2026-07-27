@@ -121,16 +121,20 @@ export async function publishPost(post, { groupIds, mode, postAt, ignoreDailyLim
       }
       await groups.setConnectionStatus(group.id, account.connection_status);
 
-      // Дневной лимит группы. Уже опубликованный в эту группу пост лимит не расходует
-      // повторно: повтор обновляет ту же строку в publications, а не добавляет новую.
+      // Дневной лимит группы. Считается на день слота (`post_at`), а не на сегодня:
+      // наполнение из архива создаёт публикации пачкой, но расписывает их на разные дни,
+      // и лимит должен ограничивать стену в конкретный день, а не темп создания.
+      // Уже опубликованный в эту группу пост лимит не расходует повторно: повтор
+      // обновляет ту же строку в publications, а не добавляет новую.
       if (!ignoreDailyLimit) {
         const limit = Number(group.posts_per_day);
-        const alreadyToday = await groups.publishedToday(group.id);
+        const alreadyThatDay = await groups.publishedOn(group.id, when);
         const isRepeat = await publications.isPublished(post.id, group.id);
-        if (!isRepeat && alreadyToday >= limit) {
+        if (!isRepeat && alreadyThatDay >= limit) {
+          const dayText = new Date(when).toLocaleDateString('ru-RU');
           throw new Error(
-            `Дневной лимит группы «${group.name}» исчерпан: ${alreadyToday} из ${limit} ` +
-              'за сегодня. Поменяйте «постов в день» в разделе «Группы» или подождите до завтра.',
+            `Дневной лимит группы «${group.name}» исчерпан: ${alreadyThatDay} из ${limit} ` +
+              `на ${dayText}. Поменяйте «постов в день» в разделе «Группы» или выберите другой день.`,
           );
         }
       }

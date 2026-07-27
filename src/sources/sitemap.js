@@ -61,7 +61,7 @@ async function fetchXml(url, label) {
  * post-sitemap.xml, и в services-sitemap.xml, тогда как архив 2024 — в нумерованных
  * файлах обоих типов. Сортировка по lastmod устойчива к таким переменам.
  */
-export async function discoverViaSitemap(source, { since, limit }) {
+export async function discoverViaSitemap(source, { since, until = null, limit }) {
   const label = `sitemap:${source.code}`;
   const indexUrl = source.sitemap_url ?? `${source.base_url}/sitemap.xml`;
   const patterns = (source.sitemap_pattern ?? '')
@@ -95,7 +95,12 @@ export async function discoverViaSitemap(source, { since, limit }) {
     if (found.length >= limit) break;
     const xml = parsedIndex.isIndex ? await fetchXml(child.loc, label) : indexXml;
     const { entries } = parseSitemap(xml);
-    const fresh = entries.filter((entry) => entry.lastmod && entry.lastmod >= since);
+    // Верхняя граница применяется только к самим материалам, но не к выбору дочерних
+    // карт: `lastmod` карты — это когда её последний раз перезаписали, и свежая карта
+    // спокойно содержит статьи двухлетней давности.
+    const fresh = entries.filter(
+      (entry) => entry.lastmod && entry.lastmod >= since && (!until || entry.lastmod <= until),
+    );
     logger.debug(
       { карта: child.loc, всего: entries.length, свежих: fresh.length },
       `${child.loc}: ${fresh.length} свежих из ${entries.length}`,
