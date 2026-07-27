@@ -91,6 +91,8 @@ export async function buildPlan({ now = new Date(), groupIds, limitPerGroup, ste
     return {
       items: [],
       groups: quotas,
+      capacity,
+      shortfall: capacity,
       reason: 'Нет материалов для постинга: проверьте источники в разделе «Источники»',
     };
   }
@@ -151,9 +153,13 @@ export async function buildPlan({ now = new Date(), groupIds, limitPerGroup, ste
   return {
     items,
     groups: quotas,
+    capacity,
+    // Нехватка — сигнал для добора (`services/backfill.js`): очередь пуста не потому,
+    // что группы заполнены, а потому что материалов в базе меньше, чем нужно плану.
+    shortfall: Math.max(0, capacity - items.length),
     stepMinutes: testStep > 0 ? testStep : null,
     reason: items.length < capacity
-      ? `Материалов меньше плана: ${items.length} из ${capacity}. Добор старыми темами — этап 9.`
+      ? `Материалов меньше плана: ${items.length} из ${capacity}`
       : null,
   };
 }

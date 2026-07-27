@@ -18,6 +18,8 @@ import { generatePost } from '../../services/generate-post.js';
 import { generateImageForPost } from '../../services/generate-image.js';
 import { publishPost } from '../../services/publish-post.js';
 import { syncGroups } from '../../services/sync-groups.js';
+import { createManualPost, inspect as inspectManual } from '../../services/manual-post.js';
+import { schedulerState } from '../../services/scheduler.js';
 import * as kie from '../../lib/kie.js';
 import * as pmp from '../../lib/postmypost.js';
 import { log, errFields } from '../../logger.js';
@@ -55,7 +57,7 @@ export function panelRouter() {
       const s = rows[0];
       const map = await settings.getMap();
       const lastCycle = await runs.lastCycle();
-      const next = nextRunAt(map, lastCycle?.started_at ?? null);
+      const next = nextRunAt(map, lastCycle?.started_at ?? map.schedule_enabled_at ?? null);
 
       const body = `
         <div class="grid">
@@ -72,10 +74,13 @@ export function panelRouter() {
           <table>
             <tr><th>Окно свежести</th><td>${esc(map.freshness_window_days)} дней</td></tr>
             <tr><th>Постов в день на группу</th><td>${esc(map.default_posts_per_day)}</td></tr>
-            <tr><th>Расписание</th><td>${esc(scheduleText(map))}</td></tr>
+            <tr><th>Расписание</th><td>${esc(scheduleText(map))}, автозапуск ${autoTag(map)}</td></tr>
             <tr><th>Следующий запуск</th><td>${esc(formatDate(next))}
-              <span class="hint">автозапуск по расписанию включается на этапе 9;
-                сейчас это время, на которое встанет прогон</span></td></tr>
+              <span class="hint">${
+                map.schedule_enabled === 'on'
+                  ? 'прогон стартует сам, нажимать кнопку не нужно'
+                  : 'автозапуск выключен — это время, на которое встанет прогон при запуске кнопкой; включается в «Настройках»'
+              }</span></td></tr>
             <tr><th>Окно публикаций</th><td>${esc(map.posting_window_start)}-${
               esc(map.posting_window_end)} МСК, разброс до ${esc(map.slot_jitter_minutes)} мин</td></tr>
             <tr><th>Режим публикации</th><td>${publishModeTag(map.publish_mode)}</td></tr>
@@ -318,14 +323,24 @@ export function panelRouter() {
 
       const mode = await settings.get('publish_mode', 'draft');
       const map = await settings.getMap();
-      const next = nextRunAt(map, (await runs.lastCycle())?.started_at ?? null);
+      const next = nextRunAt(map, (await runs.lastCycle())?.started_at ?? map.schedule_enabled_at ?? null);
       const body = `
         <div class="card">
           <h2 style="margin-top:0">Расписание прогонов</h2>
+          <p style="margin:0 0 10px">Автозапуск: ${autoTag(map)}.
+            Сейчас: ${esc(scheduleText(map))}. Следующий запуск ${esc(formatDate(next))}.</p>
           <p class="hint" style="margin:0 0 12px">
-            Сейчас: ${esc(scheduleText(map))}. Следующий запуск ${esc(formatDate(next))}.
-            Автозапуск включается на этапе 9, но время считается уже по этим настройкам.
+            Когда автозапуск включён, приложение раз в минуту сверяется с расписанием
+            и само запускает прогон - нажимать кнопку не нужно. Прогон тратит деньги
+            (текст и обложка), поэтому по умолчанию автозапуск выключен.
           </p>
+          <form class="inline" method="post" action="/settings/schedule-enabled"
+                style="margin-bottom:12px">
+            <input type="hidden" name="enabled" value="${map.schedule_enabled === 'on' ? 'off' : 'on'}">
+            <button ${map.schedule_enabled === 'on' ? 'class="ghost"' : ''} type="submit">${
+              map.schedule_enabled === 'on' ? 'Выключить автозапуск' : 'Включить автозапуск'
+            }</button>
+          </form>
           <form method="post" action="/settings/schedule">
             <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end">
               <label>режим<br>
@@ -340,6 +355,31 @@ export function panelRouter() {
                 <input type="text" name="schedule_daily_at" value="${esc(map.schedule_daily_at)}"
                        placeholder="10:00" style="width:80px"></label>
               <button type="submit">Сохранить расписание</button>
+            </div>
+          </form>
+        </div>
+        <div class="card">
+          <h2 style="margin-top:0">Добор старых тем</h2>
+          <p class="hint" style="margin:0 0 12px">
+            Когда свежих материалов меньше, чем мест в группах, прогон сам перечитывает
+            источники с большей глубиной - 2х, 4х, 8х от окна свежести, но не глубже
+            указанного предела - и добирает более ранние темы. Без добора прогон при
+            исчерпании свежего просто ничего бы не опубликовал.
+          </p>
+          <form method="post" action="/settings/backfill">
+            <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end">
+              <label>добор<br>
+                <select name="topic_backfill_enabled">
+                  <option value="on"${map.topic_backfill_enabled === 'on' ? ' selected' : ''}>включён</option>
+                  <option value="off"${map.topic_backfill_enabled === 'off' ? ' selected' : ''}>выключен</option>
+                </select></label>
+              <label>глубина архива, дней<br>
+                <input type="number" name="topic_backfill_max_days" min="1" max="3650"
+                       value="${esc(map.topic_backfill_max_days)}" style="width:100px"></label>
+              <label>пауза после осечки, мин<br>
+                <input type="number" name="scheduler_retry_minutes" min="1" max="720"
+                       value="${esc(map.scheduler_retry_minutes)}" style="width:100px"></label>
+              <button type="submit">Сохранить</button>
             </div>
           </form>
         </div>
@@ -446,7 +486,7 @@ export function panelRouter() {
       await settings.set('schedule_interval_hours', String(hours));
       await settings.set('schedule_daily_at', at);
       const map = await settings.getMap();
-      const next = nextRunAt(map, (await runs.lastCycle())?.started_at ?? null);
+      const next = nextRunAt(map, (await runs.lastCycle())?.started_at ?? map.schedule_enabled_at ?? null);
       logger.info(
         { режим: mode, интервал: hours, время: at, кто: req.user.login },
         `Расписание изменено: ${scheduleText(map)}, следующий запуск ${formatDate(next)}`,
@@ -458,6 +498,58 @@ export function panelRouter() {
       );
     } catch (error) {
       logger.error(errFields(error), 'Сохранение расписания упало');
+      res.redirect(`/settings?err=${encodeURIComponent(error.message)}`);
+    }
+  });
+
+  // Автозапуск — отдельной кнопкой, как и режим публикации: включение означает, что
+  // система начнёт тратить деньги без участия человека, и это не должно случайно
+  // «сохраниться заодно» с правкой соседнего поля.
+  router.post('/settings/schedule-enabled', async (req, res) => {
+    try {
+      const enabled = req.body.enabled === 'on' ? 'on' : 'off';
+      await settings.set('schedule_enabled', enabled);
+      // Момент включения — точка отсчёта для «каждые N часов», пока прогонов не было.
+      // Иначе первый тик после включения счёл бы, что интервал давно прошёл.
+      if (enabled === 'on') await settings.set('schedule_enabled_at', new Date().toISOString());
+      const map = await settings.getMap();
+      const next = nextRunAt(map, (await runs.lastCycle())?.started_at ?? map.schedule_enabled_at ?? null);
+      logger.warn(
+        { автозапуск: enabled, расписание: scheduleText(map), кто: req.user.login },
+        `Автозапуск ${enabled === 'on' ? 'включён' : 'выключен'} (${scheduleText(map)})`,
+      );
+      res.redirect(
+        `/settings?ok=${encodeURIComponent(
+          enabled === 'on'
+            ? `Автозапуск включён: ${scheduleText(map)}, ближайший прогон ${formatDate(next)}`
+            : 'Автозапуск выключен — прогоны только по кнопке',
+        )}`,
+      );
+    } catch (error) {
+      logger.error(errFields(error), 'Переключение автозапуска упало');
+      res.redirect(`/settings?err=${encodeURIComponent(error.message)}`);
+    }
+  });
+
+  router.post('/settings/backfill', async (req, res) => {
+    try {
+      const enabled = req.body.topic_backfill_enabled === 'off' ? 'off' : 'on';
+      const days = requireInt(req.body.topic_backfill_max_days, 1, 3650, 'Глубина архива, дней');
+      const retry = requireInt(req.body.scheduler_retry_minutes, 1, 720, 'Пауза после осечки, минут');
+      await settings.set('topic_backfill_enabled', enabled);
+      await settings.set('topic_backfill_max_days', String(days));
+      await settings.set('scheduler_retry_minutes', String(retry));
+      logger.info(
+        { добор: enabled, глубина: days, пауза: retry, кто: req.user.login },
+        `Добор ${enabled === 'on' ? 'включён' : 'выключен'}, глубина ${days} дней`,
+      );
+      res.redirect(
+        `/settings?ok=${encodeURIComponent(
+          `Добор ${enabled === 'on' ? 'включён' : 'выключен'}, глубина ${days} дней`,
+        )}`,
+      );
+    } catch (error) {
+      logger.error(errFields(error), 'Сохранение настроек добора упало');
       res.redirect(`/settings?err=${encodeURIComponent(error.message)}`);
     }
   });
@@ -832,7 +924,7 @@ export function panelRouter() {
           <h2 style="margin-top:0">Публикация в ВК</h2>
           ${await publicationsTable(post.id)}
           ${post.image_url
-            ? await publishForm(post)
+            ? await publishForm(post, Number.parseInt(req.query.group, 10))
             : '<p class="hint" style="margin:0">Публиковать нечего: у поста нет обложки.</p>'}
         </div>
         <div class="card">
@@ -1070,9 +1162,131 @@ export function panelRouter() {
     }
   });
 
+  // ── Ручной режим ─────────────────────────────────────────────────────────
+  router.get('/manual', async (req, res, next) => {
+    try {
+      const list = await groups.listAll();
+      const recent = await query(
+        `SELECT p.id, p.title, p.status, p.image_url, p.created_at, a.url AS article_url
+           FROM posts p JOIN articles a ON a.id = p.article_id
+           JOIN sources s ON s.id = a.source_id
+          WHERE s.code = 'manual' OR a.url LIKE 'https://manual.local/%'
+          ORDER BY p.id DESC LIMIT 10`,
+      );
+
+      const options = list
+        .filter((group) => group.is_active && !group.deleted_at)
+        .map((group) => `<option value="${group.id}">${esc(group.name)} (сегодня ${
+          group.published_today} из ${group.posts_per_day})</option>`)
+        .join('\n');
+
+      const recentRows = recent.rows.length
+        ? recent.rows
+            .map((row) => `<tr>
+              <td><a href="/posts/${row.id}">${esc(row.title)}</a></td>
+              <td>${postStatusTag(row.status)}</td>
+              <td class="hint">${esc(formatDate(row.created_at))}</td>
+            </tr>`)
+            .join('\n')
+        : '<tr><td colspan="3" class="empty">Ручных постов ещё не было</td></tr>';
+
+      const body = `
+        <div class="card">
+          <h2 style="margin-top:0">Пост по ссылке или по теме</h2>
+          <p class="hint" style="margin:0 0 12px">
+            Заполните одно поле из двух. По ссылке система забирает текст статьи
+            (WP API, при неудаче firecrawl) и делает рерайт. По теме текста нет -
+            обзор пишет ИИ по названию проекта, как для all-comment и scama.net.
+            Пост создаётся вместе с обложкой и открывается для проверки: публикация
+            отдельной кнопкой, автоматически ничего не уходит.
+          </p>
+          <form method="post" action="/manual">
+            <div style="display:flex;flex-direction:column;gap:10px;max-width:640px">
+              <label>ссылка на материал<br>
+                <input type="text" name="url" placeholder="https://..." style="width:100%"></label>
+              <label>или тема (название проекта)<br>
+                <input type="text" name="topic" placeholder="Например: Global ERP" style="width:100%"></label>
+              <label>группа для публикации<br>
+                <select name="group_id" style="min-width:280px">
+                  <option value="">выбрать позже, в карточке поста</option>
+                  ${options}
+                </select></label>
+              <label class="hint"><input type="checkbox" name="force" value="1">
+                писать, даже если про эту тему уже был пост</label>
+              <div>
+                <button type="submit">Сгенерировать пост</button>
+                <span class="hint" style="margin-left:8px">займёт 20-60 секунд:
+                  текст и обложка делаются сразу</span>
+              </div>
+            </div>
+          </form>
+        </div>
+        <h2>Последние ручные посты</h2>
+        <div class="card">
+          <table>
+            <thead><tr><th>Пост</th><th>Статус</th><th>Создан</th></tr></thead>
+            <tbody>${recentRows}</tbody>
+          </table>
+        </div>`;
+
+      res.type('html').send(
+        page({
+          title: 'Ручной режим',
+          active: '/manual',
+          user: req.user,
+          heading: 'Ручной режим',
+          sub: 'Пост вне очереди: по ссылке или по одной теме.',
+          message: buildSourceMessage(req.query),
+          body,
+        }),
+      );
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.post('/manual', async (req, res) => {
+    try {
+      const url = String(req.body.url ?? '').trim();
+      const topic = String(req.body.topic ?? '').trim();
+      const force = req.body.force === '1';
+      if (!url && !topic) throw new Error('Заполните ссылку или тему');
+
+      // Дедуп в ручном режиме предупреждает, а не запрещает: клиент мог захотеть
+      // второй пост по той же теме осознанно (например, вышло продолжение истории).
+      if (!force) {
+        const found = await inspectManual({ url, topic });
+        if (found.owner && found.post) {
+          throw new Error(
+            `Про тему «${found.owner.topic_name ?? found.topic.name}» уже писали: ` +
+              `пост #${found.post.id}. ` +
+              'Если нужен ещё один — отметьте галочку «писать, даже если про эту тему уже был пост».',
+          );
+        }
+      }
+
+      const result = await createManualPost({ url: url || null, topic: topic || null });
+      const groupId = Number.parseInt(req.body.group_id, 10);
+      const notes = [`Пост #${result.post.id} готов${result.post.image_url ? ' с обложкой' : ''}.`,
+        ...result.warnings];
+
+      logger.info(
+        { пост: result.post.id, по_ссылке: Boolean(url), кто: req.user.login },
+        `Ручной пост #${result.post.id} создан (${url ? 'по ссылке' : 'по теме'})`,
+      );
+
+      // Группу не публикуем сами: критерий этапа — «показывает результат до публикации».
+      // Она передаётся в карточку поста, где уже стоит галочкой в форме публикации.
+      const suffix = Number.isNaN(groupId) ? '' : `&group=${groupId}`;
+      res.redirect(`/posts/${result.post.id}?ok=${encodeURIComponent(notes.join(' '))}${suffix}`);
+    } catch (error) {
+      logger.error(errFields(error), 'Ручной пост не создался');
+      res.redirect(`/manual?err=${encodeURIComponent(error.message)}`);
+    }
+  });
+
   // ── Разделы будущих этапов ───────────────────────────────────────────────
   const stubs = [
-    ['/manual', 'Ручной режим', 9, 'Вставить ссылку или тему — система сделает пост в выбранную группу.'],
     ['/runs', 'Прогоны', 11, 'История запусков: найдено, сгенерировано, опубликовано, ошибки, request-id.'],
     ['/published', 'Опубликовано', 11, 'Лог постов: группа, тема, время, ссылка на пост в ВК, обложка.'],
   ];
@@ -1115,7 +1329,7 @@ export function panelRouter() {
    * не уйдёт, и сразу понятно, где это менять (раздел «Группы»). Дневной лимит
    * показывается рядом — публикация сверх него отказывает на уровне сервиса.
    */
-  async function publishForm(post) {
+  async function publishForm(post, onlyGroupId = NaN) {
     const list = await groups.listAll();
     const mode = await settings.get('publish_mode', 'draft');
     const syncButton = `<form class="inline" method="post" action="/groups/sync">
@@ -1144,9 +1358,12 @@ export function panelRouter() {
         if (!group.is_active) notes.push('<span class="tag off">выключена</span>');
         if (broken) notes.push('<span class="tag off">отключён</span>');
         if (group.is_active && !broken && left === 0) notes.push('лимит на сегодня исчерпан');
+        // Пришли из ручного режима с выбранной группой — отмечаем только её,
+        // остальные оставляем доступными, но снятыми.
+        const picked = Number.isNaN(onlyGroupId) ? true : group.id === onlyGroupId;
         return `<label style="display:block;margin-bottom:6px">
             <input type="checkbox" name="group_ids" value="${group.id}"
-              ${blocked ? 'disabled' : 'checked'}>
+              ${blocked ? 'disabled' : (picked ? 'checked' : '')}>
             ${esc(group.name)}
             <span class="hint">${notes.filter(Boolean).join(' · ')}</span>
           </label>`;
@@ -1225,11 +1442,20 @@ export function panelRouter() {
          </div>`
       : '';
 
+    const auto = await schedulerState(map);
+
     return `<div class="card">
         ${bgError
           ? `<p style="margin:0 0 10px"><span class="tag off">прогон не пошёл</span>
                ${esc(bgError)}</p>`
           : ''}
+        <p style="margin:0 0 10px">Автозапуск ${autoTag(map)}${
+          auto.enabled ? `, ближайший ${esc(formatDate(auto.nextAt))}` : ''
+        }${
+          auto.failureReason
+            ? ` · <span class="tag off">осечка</span> <span class="hint">${esc(auto.failureReason)}</span>`
+            : ''
+        }</p>
         <p style="margin:0 0 10px">Квоты на сегодня: ${quotas}</p>
         <p class="hint" style="margin:0 0 10px">
           ${plan.stepMinutes
@@ -1460,6 +1686,19 @@ function runItemTag(item) {
   if (item.status === 'generated') return '<span class="tag soon">текст готов</span>';
   if (item.status === 'skipped') return '<span class="tag off">пропущен</span>';
   return '<span class="tag soon">в плане</span>';
+}
+
+function postStatusTag(status) {
+  if (status === 'failed') return '<span class="tag off">сбой</span>';
+  if (status === 'published') return '<span class="tag on">опубликован</span>';
+  return '<span class="tag soon">готов</span>';
+}
+
+/** Включён ли автозапуск прогонов. Отдельный тег: это главный переключатель системы. */
+function autoTag(map) {
+  return map.schedule_enabled === 'on'
+    ? '<span class="tag on">включён</span>'
+    : '<span class="tag off">выключен</span>';
 }
 
 function publishModeTag(mode) {

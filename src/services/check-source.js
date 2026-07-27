@@ -39,7 +39,7 @@ export async function freshnessCutoff() {
  * Порядок попыток осознанный: сначала WP REST API (бесплатно и полный текст),
  * firecrawl — только как страховка, потому что у него 1000 запросов в месяц на проект.
  */
-async function extractOne(source, article) {
+export async function extractOne(source, article) {
   if (source.fetch_via === 'wp_api') {
     try {
       const result = await fetchArticleViaWpApi(source, article.url);
@@ -66,7 +66,14 @@ async function extractOne(source, article) {
  * Полная проверка одного источника: обнаружение → сохранение → извлечение текста.
  * Пишет запись в runs, чтобы прогон был виден в панели и связан с логами по request-id.
  */
-export async function checkSource(source, { kind = 'source_check' } = {}) {
+/**
+ * @param {object} source строка sources
+ * @param {object} [options]
+ * @param {'source_check'|'backfill'} [options.kind] чем инициирована проверка
+ * @param {Date} [options.since] окно обнаружения; по умолчанию — `freshness_window_days`.
+ *   Добор (этап 9) передаёт более раннюю дату, чтобы дочерпать архив, не трогая настройку.
+ */
+export async function checkSource(source, { kind = 'source_check', since: sinceOverride } = {}) {
   const requestId = getRequestId() ?? 'no-rid';
   const runId = await runs.startRun({ requestId, kind, meta: { source: source.code } });
   extendContext({ runId });
@@ -88,7 +95,7 @@ export async function checkSource(source, { kind = 'source_check' } = {}) {
 
   try {
     return await withSourceLock(source.id, async () => {
-      const since = await freshnessCutoff();
+      const since = sinceOverride ?? (await freshnessCutoff());
       const discoveryLimit = await settings.getInt('discovery_limit_per_source', 50);
       const extractLimit = await settings.getInt('extract_limit_per_check', 10);
 

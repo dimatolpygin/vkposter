@@ -5,6 +5,7 @@ import { pool, waitForDatabase, closePool } from './db/pool.js';
 import { runMigrations } from './db/migrate.js';
 import { runSeeds } from './bootstrap/seed.js';
 import { createApp } from './http/app.js';
+import { startScheduler, stopScheduler } from './services/scheduler.js';
 
 const startupLog = log('запуск');
 
@@ -45,6 +46,11 @@ async function main() {
   server.keepAliveTimeout = 65_000;
   server.headersTimeout = 66_000;
 
+  // Планировщик поднимается после HTTP: прогон должен идти на живом приложении,
+  // а не в момент, когда порт ещё не открыт. Сам он ничего не делает, пока
+  // `schedule_enabled` в настройках не переведён в `on`.
+  startScheduler();
+
   setupShutdown(server);
 }
 
@@ -63,6 +69,7 @@ function setupShutdown(server) {
     }, 15_000);
     forceExit.unref();
 
+    stopScheduler();
     await new Promise((resolve) => server.close(resolve));
     startupLog.info('HTTP-сервер закрыт');
     await closePool().catch((error) => startupLog.error(errFields(error), 'Не удалось закрыть пул БД'));

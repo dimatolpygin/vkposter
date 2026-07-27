@@ -57,6 +57,37 @@ export function nextRunAt(settingsMap, lastRunAt = null, now = new Date()) {
   return today > now ? today : atTime(addDays(now, 1), at);
 }
 
+/**
+ * Пора ли запускать прогон прямо сейчас.
+ *
+ * Отдельная функция, а не сравнение с `nextRunAt`: та по определению возвращает время
+ * в будущем, и «наступило ли оно» по ней не проверить — момент запуска пролетел бы
+ * между тиками. Здесь смотрим назад: с какого момента прогон должен был состояться
+ * и был ли он с тех пор.
+ *
+ * @param {object} settingsMap настройки расписания
+ * @param {Date|string|null} anchor точка отсчёта: старт последнего прогона, а если
+ *   прогонов ещё не было — момент включения автозапуска. Без якоря не запускаем:
+ *   иначе «каждые N часов» срабатывало бы на первом же тике после старта контейнера.
+ * @param {Date} [now]
+ */
+export function isRunDue(settingsMap, anchor, now = new Date()) {
+  if (!anchor) return false;
+  const from = new Date(anchor);
+  if (Number.isNaN(from.getTime())) return false;
+
+  if (settingsMap.schedule_mode === 'interval') {
+    const hours = Math.max(1, Number.parseInt(settingsMap.schedule_interval_hours ?? '5', 10) || 5);
+    return now.getTime() - from.getTime() >= hours * 3600_000;
+  }
+
+  // Ежедневный режим: положенный момент сегодня уже прошёл, а прогона с тех пор не было.
+  const at = parseHhMm(settingsMap.schedule_daily_at, '10:00');
+  const today = atTime(now, at);
+  const due = today <= now ? today : atTime(addDays(now, -1), at);
+  return from < due;
+}
+
 export function scheduleText(settingsMap) {
   return settingsMap.schedule_mode === 'interval'
     ? `каждые ${settingsMap.schedule_interval_hours} ч`

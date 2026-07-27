@@ -17,7 +17,7 @@ const UNIQUE_VIOLATION = '23505';
 async function findTopicOwner(keys) {
   if (keys.length === 0) return null;
   const { rows } = await query(
-    `SELECT a.id, a.url, a.topic_key, s.code AS source_code
+    `SELECT a.id, a.url, a.topic_key, a.topic_name, s.code AS source_code
        FROM articles a
        JOIN sources s ON s.id = a.source_id
       WHERE a.status <> 'duplicate'
@@ -429,4 +429,55 @@ export async function listRejected(limit = 20) {
 export async function countAll() {
   const { rows } = await query('SELECT count(*)::int AS count FROM articles');
   return rows[0].count;
+}
+
+export async function findByUrlNorm(urlNorm) {
+  const { rows } = await query(
+    `SELECT a.*, s.code AS source_code, s.content_mode, s.fetch_via
+       FROM articles a JOIN sources s ON s.id = a.source_id
+      WHERE a.url_norm = $1`,
+    [urlNorm],
+  );
+  return rows[0] ?? null;
+}
+
+/** Владелец темы — нужен ручному режиму, чтобы предупредить «про это уже писали». */
+export async function topicOwner(keys) {
+  return findTopicOwner(keys.filter(Boolean));
+}
+
+/**
+ * Материал, заведённый человеком через панель (ссылка или тема).
+ *
+ * Отличается от `saveCandidate` тем, что **не отбрасывает дубли темы**: клиент указал
+ * материал явно, и решение «писать или не писать» принимает он, а не дедуп. Предупреждение
+ * о занятой теме показывается в панели до генерации.
+ */
+export async function createManual({ sourceId, url, title, content, topicHint, publishedAt }) {
+  const urlNorm = normalizeUrl(url) ?? url;
+  const topic = extractTopic({ title, url, topicHint });
+  if (!topic.key) {
+    throw new Error('Не удалось определить тему: укажите название проекта или ссылку с ним в адресе');
+  }
+  const { rows } = await query(
+    `INSERT INTO articles (source_id, url, url_norm, title, published_at, content,
+                           content_fetched_at, status, topic_key, topic_name, topic_aliases, topic_via)
+     VALUES ($1, $2, $3, $4, $5, $6, CASE WHEN $6::text IS NULL THEN NULL ELSE now() END,
+             CASE WHEN $6::text IS NULL THEN 'new' ELSE 'fetched' END,
+             $7, $8, $9::text[], $10)
+     RETURNING *`,
+    [
+      sourceId,
+      url,
+      urlNorm,
+      title ?? null,
+      publishedAt ?? new Date(),
+      content ?? null,
+      topic.key,
+      topic.name,
+      topic.aliases,
+      topic.via,
+    ],
+  );
+  return { article: rows[0], topic };
 }

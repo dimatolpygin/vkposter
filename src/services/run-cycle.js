@@ -3,6 +3,7 @@ import * as posts from '../repo/posts.js';
 import * as runs from '../repo/runs.js';
 import { publicBaseReachable } from '../lib/media.js';
 import { buildPlan } from './plan-run.js';
+import { backfillArticles } from './backfill.js';
 import { generatePost } from './generate-post.js';
 import { generateImageForPost } from './generate-image.js';
 import { publishPost, usingLocalPmpStub } from './publish-post.js';
@@ -125,6 +126,7 @@ async function executeCycle({ kind, groupIds, limitPerGroup, stepMinutes }) {
   let run = await runs.unfinishedCycle();
   const resumed = Boolean(run);
   let planReason = null;
+  let backfilled = null;
 
   if (run) {
     logger.warn(
@@ -132,7 +134,21 @@ async function executeCycle({ kind, groupIds, limitPerGroup, stepMinutes }) {
       `Найден незаконченный прогон #${run.id} — продолжаем его, новый план не строим`,
     );
   } else {
-    const plan = await buildPlan({ groupIds, limitPerGroup, stepMinutes });
+    let plan = await buildPlan({ groupIds, limitPerGroup, stepMinutes });
+
+    // Свежих материалов меньше, чем мест в группах — дочерпываем архив и строим план
+    // заново. Без этого прогон при исчерпании свежих тем просто отдавал бы «нечего
+    // публиковать», хотя на сайтах материала ещё много.
+    if (plan.shortfall > 0) {
+      const backfill = await backfillArticles(plan.shortfall);
+      if (backfill.added > 0) {
+        plan = await buildPlan({ groupIds, limitPerGroup, stepMinutes });
+        backfilled = backfill;
+      } else if (backfill.skipped) {
+        logger.info({ причина: backfill.skipped }, `Добор не выполнялся: ${backfill.skipped}`);
+      }
+    }
+
     planReason = plan.reason;
     if (plan.items.length === 0) {
       throw new Error(plan.reason ?? 'Планировать нечего');
@@ -145,6 +161,9 @@ async function executeCycle({ kind, groupIds, limitPerGroup, stepMinutes }) {
         групп: plan.groups.length,
         окно: plan.items.length
           ? `${formatTime(plan.items[0].postAt)}-${formatTime(plan.items.at(-1).postAt)}`
+          : null,
+        добор: backfilled
+          ? `${backfilled.added} материалов за ${backfilled.days} дней`
           : null,
       },
     });
@@ -222,6 +241,7 @@ async function executeCycle({ kind, groupIds, limitPerGroup, stepMinutes }) {
   return {
     runId: run.id,
     resumed,
+    backfilled,
     planned: items.length,
     generated,
     published,
