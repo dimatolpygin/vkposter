@@ -81,9 +81,12 @@ export async function inspect({ url, topic }) {
  * @param {string} [input.url] адрес материала
  * @param {string} [input.topic] название проекта (когда ссылки нет)
  * @param {boolean} [input.withImage] сразу сгенерировать обложку (по умолчанию да)
+ * @param {boolean} [input.force] писать, даже если про тему уже был пост: материал заводится
+ *   со своим ключом темы (`<тема>-m2`), потому что уникальный индекс по активной теме —
+ *   гарантия автоматического дедупа и отключать её ради ручного повтора нельзя.
  * @returns {Promise<{post: object, article: object, warnings: string[], reusedArticle: boolean}>}
  */
-export async function createManualPost({ url, topic, withImage = true }) {
+export async function createManualPost({ url, topic, withImage = true, force = false }) {
   const warnings = [];
   const cleanUrl = url?.trim() || null;
   const cleanTopic = topic?.trim() || null;
@@ -107,8 +110,12 @@ export async function createManualPost({ url, topic, withImage = true }) {
         url: cleanUrl,
         title: cleanTopic,
         topicHint: cleanTopic,
+        force,
       });
       article = { ...created.article, source_code: source.code, content_mode: source.content_mode };
+      if (/-m\d+$/.test(created.topic.key)) {
+        warnings.push(`Про эту тему уже писали — повтор заведён отдельной темой «${created.topic.key}».`);
+      }
 
       // Текст достаём тем же путём, что и обход источников. Не вышло — это не отказ:
       // модель умеет писать по одной теме, так работают all-comment и scama.net.
@@ -116,7 +123,11 @@ export async function createManualPost({ url, topic, withImage = true }) {
         const extracted = await extractOne(source, article);
         if (extracted?.text?.length > 200) {
           await articles.saveContent(article.id, extracted);
-          await articles.refreshTopic(article.id);
+          // Уточнение темы по настоящему заголовку — только для обычного материала.
+          // У осознанного повтора ключ намеренно свой (`…-m2`), а `refreshTopic` пересчитал
+          // бы его по заголовку, нашёл занятую тему и пометил материал дублем — то есть
+          // отменил бы ровно то, на что человек поставил галочку.
+          if (!force) await articles.refreshTopic(article.id);
           article = await articles.findByUrlNorm(urlNorm);
         } else {
           warnings.push('Текст статьи достать не удалось — пост написан по теме.');
@@ -147,8 +158,12 @@ export async function createManualPost({ url, topic, withImage = true }) {
       url: `https://manual.local/${guess.key}-${Date.now()}`,
       title: cleanTopic,
       topicHint: cleanTopic,
+      force,
     });
     article = { ...created.article, source_code: source.code, content_mode: 'topic_only' };
+    if (/-m\d+$/.test(created.topic.key)) {
+      warnings.push(`Про эту тему уже писали — повтор заведён отдельной темой «${created.topic.key}».`);
+    }
   }
 
   logger.info(

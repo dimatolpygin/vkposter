@@ -13,7 +13,7 @@ import * as runs from '../../repo/runs.js';
 import { checkSource } from '../../services/check-source.js';
 import { buildPlan } from '../../services/plan-run.js';
 import { startCycleInBackground, runningSince, lastBackgroundError } from '../../services/run-cycle.js';
-import { nextRunAt, scheduleText } from '../../lib/schedule.js';
+import { nextRunAt, isRunDue, scheduleText } from '../../lib/schedule.js';
 import { generatePost } from '../../services/generate-post.js';
 import { generateImageForPost } from '../../services/generate-image.js';
 import { publishPost } from '../../services/publish-post.js';
@@ -58,6 +58,11 @@ export function panelRouter() {
       const map = await settings.getMap();
       const lastCycle = await runs.lastCycle();
       const next = nextRunAt(map, lastCycle?.started_at ?? map.schedule_enabled_at ?? null);
+      // Пропущенный момент запуска: расписание сдвинули назад или приложение стояло.
+      // `nextRunAt` по определению смотрит вперёд и показал бы завтрашний день, пока
+      // планировщик стартует прогон в ближайшую минуту - об этом надо сказать прямо.
+      const overdue = map.schedule_enabled === 'on'
+        && isRunDue(map, lastCycle?.started_at ?? map.schedule_enabled_at ?? null);
 
       const body = `
         <div class="grid">
@@ -75,11 +80,14 @@ export function panelRouter() {
             <tr><th>Окно свежести</th><td>${esc(map.freshness_window_days)} дней</td></tr>
             <tr><th>Постов в день на группу</th><td>${esc(map.default_posts_per_day)}</td></tr>
             <tr><th>Расписание</th><td>${esc(scheduleText(map))}, автозапуск ${autoTag(map)}</td></tr>
-            <tr><th>Следующий запуск</th><td>${esc(formatDate(next))}
+            <tr><th>Следующий запуск</th><td>${
+              overdue ? 'в ближайшую минуту' : esc(formatDate(next))}
               <span class="hint">${
-                map.schedule_enabled === 'on'
-                  ? 'прогон стартует сам, нажимать кнопку не нужно'
-                  : 'автозапуск выключен — это время, на которое встанет прогон при запуске кнопкой; включается в «Настройках»'
+                overdue
+                  ? 'момент по расписанию уже прошёл, а прогона с тех пор не было — планировщик стартует его сам'
+                  : map.schedule_enabled === 'on'
+                    ? 'прогон стартует сам, нажимать кнопку не нужно'
+                    : 'автозапуск выключен — это время, на которое встанет прогон при запуске кнопкой; включается в «Настройках»'
               }</span></td></tr>
             <tr><th>Окно публикаций</th><td>${esc(map.posting_window_start)}-${
               esc(map.posting_window_end)} МСК, разброс до ${esc(map.slot_jitter_minutes)} мин</td></tr>
@@ -1265,7 +1273,7 @@ export function panelRouter() {
         }
       }
 
-      const result = await createManualPost({ url: url || null, topic: topic || null });
+      const result = await createManualPost({ url: url || null, topic: topic || null, force });
       const groupId = Number.parseInt(req.body.group_id, 10);
       const notes = [`Пост #${result.post.id} готов${result.post.image_url ? ' с обложкой' : ''}.`,
         ...result.warnings];
@@ -1450,7 +1458,9 @@ export function panelRouter() {
                ${esc(bgError)}</p>`
           : ''}
         <p style="margin:0 0 10px">Автозапуск ${autoTag(map)}${
-          auto.enabled ? `, ближайший ${esc(formatDate(auto.nextAt))}` : ''
+          auto.enabled
+            ? (auto.due ? ', стартует в ближайшую минуту' : `, ближайший ${esc(formatDate(auto.nextAt))}`)
+            : ''
         }${
           auto.failureReason
             ? ` · <span class="tag off">осечка</span> <span class="hint">${esc(auto.failureReason)}</span>`

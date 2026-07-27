@@ -447,17 +447,48 @@ export async function topicOwner(keys) {
 }
 
 /**
+ * Свободный вариант ключа темы для осознанного повтора.
+ *
+ * Тема занята активным материалом, а клиент всё равно хочет второй пост (вышло
+ * продолжение истории). Просто вставить второй материал с тем же ключом нельзя:
+ * `articles_topic_active_uidx` этого не даст — и правильно, иначе автоматический дедуп
+ * перестал бы быть гарантией. Поэтому повтор получает свой ключ `<тема>-m2`, `-m3`, …
+ * Название темы (`topic_name`) остаётся человеческим — именно оно уходит в промт,
+ * а базовый ключ остаётся за первым материалом, и автообход по-прежнему видит дубли.
+ */
+async function freeTopicKey(baseKey) {
+  for (let attempt = 2; attempt <= 50; attempt += 1) {
+    const key = `${baseKey}-m${attempt}`;
+    const { rows } = await query(
+      `SELECT 1 FROM articles WHERE topic_key = $1 AND status <> 'duplicate' LIMIT 1`,
+      [key],
+    );
+    if (rows.length === 0) return key;
+  }
+  throw new Error(`По теме «${baseKey}» уже 50 материалов — похоже, что-то пошло не так`);
+}
+
+/**
  * Материал, заведённый человеком через панель (ссылка или тема).
  *
  * Отличается от `saveCandidate` тем, что **не отбрасывает дубли темы**: клиент указал
  * материал явно, и решение «писать или не писать» принимает он, а не дедуп. Предупреждение
- * о занятой теме показывается в панели до генерации.
+ * о занятой теме показывается в панели до генерации, а согласие приходит флагом `force`.
  */
-export async function createManual({ sourceId, url, title, content, topicHint, publishedAt }) {
+export async function createManual({ sourceId, url, title, content, topicHint, publishedAt, force = false }) {
   const urlNorm = normalizeUrl(url) ?? url;
   const topic = extractTopic({ title, url, topicHint });
   if (!topic.key) {
     throw new Error('Не удалось определить тему: укажите название проекта или ссылку с ним в адресе');
+  }
+  if (force) {
+    const owner = await findTopicOwner([topic.key, ...topic.aliases]);
+    if (owner) {
+      topic.key = await freeTopicKey(topic.key);
+      // Псевдонимы того же материала занял бы тот же индекс на следующем повторе,
+      // а никакой пользы от них у ручного повтора нет.
+      topic.aliases = [];
+    }
   }
   const { rows } = await query(
     `INSERT INTO articles (source_id, url, url_norm, title, published_at, content,
