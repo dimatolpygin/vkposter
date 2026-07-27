@@ -1174,6 +1174,7 @@ export function panelRouter() {
    */
   async function runCard(lastCycle) {
     const plan = await buildPlan();
+    const map = await settings.getMap();
     const planRows = plan.items.length
       ? plan.items
           .map(
@@ -1219,6 +1220,16 @@ export function panelRouter() {
 
     return `<div class="card">
         <p style="margin:0 0 10px">Квоты на сегодня: ${quotas}</p>
+        <p class="hint" style="margin:0 0 10px">
+          Времена слотов считаются от окна публикаций ${esc(map.posting_window_start)}-${
+            esc(map.posting_window_end)} МСК${
+            map.schedule_mode === 'interval'
+              ? `, но не дальше чем на ${esc(map.schedule_interval_hours)} ч от старта:
+                 при расписании «каждые ${esc(map.schedule_interval_hours)} ч» посты должны
+                 уложиться до следующего прогона`
+              : ' (расписание «раз в день» растягивает посты на всё окно)'
+          }. Если окно на сегодня уже закрыто, прогон встаёт на завтрашнее.
+        </p>
         <table>
           <thead><tr><th>Слот</th><th>Группа</th><th>Материал</th><th>Время публикации</th></tr></thead>
           <tbody>${planRows}</tbody>

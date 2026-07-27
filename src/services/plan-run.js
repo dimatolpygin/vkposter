@@ -110,12 +110,20 @@ export async function buildPlan({ now = new Date(), groupIds, limitPerGroup } = 
     if (!placed) break;
   }
 
+  // При расписании «каждые N часов» посты растягиваются максимум до следующего прогона:
+  // иначе слоты соседних прогонов лягут друг на друга в одном и том же окне.
+  const map = await settings.getMap();
+  const maxSpanMinutes = map.schedule_mode === 'interval'
+    ? Math.max(1, Number.parseInt(map.schedule_interval_hours ?? '5', 10) || 5) * 60
+    : null;
+
   const times = slotTimes(assignments.length, {
     now,
-    windowStart: await settings.get('posting_window_start', '10:00'),
-    windowEnd: await settings.get('posting_window_end', '21:00'),
-    leadMinutes: await settings.getInt('publish_delay_minutes', 3),
-    jitterMinutes: await settings.getInt('slot_jitter_minutes', 7),
+    windowStart: map.posting_window_start ?? '10:00',
+    windowEnd: map.posting_window_end ?? '21:00',
+    leadMinutes: Number.parseInt(map.publish_delay_minutes ?? '3', 10) || 3,
+    jitterMinutes: Number.parseInt(map.slot_jitter_minutes ?? '7', 10) || 7,
+    maxSpanMinutes,
   });
 
   const items = assignments.map((assignment, index) => ({

@@ -75,6 +75,9 @@ export function scheduleText(settingsMap) {
  * @param {string} [options.windowEnd] «21:00»
  * @param {number} [options.leadMinutes] минимальный отрыв от «сейчас» (postmypost не любит прошлое)
  * @param {number} [options.jitterMinutes] максимальный случайный сдвиг внутри слота
+ * @param {number} [options.maxSpanMinutes] не растягивать дальше, чем на столько минут
+ *   от начала: при расписании «каждые N часов» посты должны уложиться до следующего
+ *   прогона, иначе слоты соседних прогонов наложатся друг на друга
  * @returns {Date[]} времена по возрастанию, минуты не повторяются
  */
 export function slotTimes(count, {
@@ -83,6 +86,7 @@ export function slotTimes(count, {
   windowEnd = '21:00',
   leadMinutes = 3,
   jitterMinutes = 7,
+  maxSpanMinutes = null,
 } = {}) {
   if (count <= 0) return [];
 
@@ -98,6 +102,13 @@ export function slotTimes(count, {
     start = atTime(addDays(now, 1), parseHhMm(windowStart, '10:00'));
     end = atTime(addDays(now, 1), parseHhMm(windowEnd, '21:00'));
     if (end <= start) end = new Date(start.getTime() + 3600_000);
+  }
+
+  // Потолок по длине прогона (интервальное расписание). Меньше минуты на пост не даём:
+  // иначе при коротком интервале все посты слипнутся в начало.
+  if (maxSpanMinutes) {
+    const capped = start.getTime() + Math.max(maxSpanMinutes, count) * 60_000;
+    if (capped < end.getTime()) end = new Date(capped);
   }
 
   const span = end.getTime() - start.getTime();
