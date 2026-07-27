@@ -12,7 +12,7 @@ import * as publications from '../../repo/publications.js';
 import * as runs from '../../repo/runs.js';
 import { checkSource } from '../../services/check-source.js';
 import { buildPlan } from '../../services/plan-run.js';
-import { runCycle } from '../../services/run-cycle.js';
+import { startCycleInBackground, runningSince } from '../../services/run-cycle.js';
 import { nextRunAt, scheduleText } from '../../lib/schedule.js';
 import { generatePost } from '../../services/generate-post.js';
 import { generateImageForPost } from '../../services/generate-image.js';
@@ -1199,9 +1199,15 @@ export function panelRouter() {
           .join(' · ')
       : 'нет включённых групп';
 
+    const busySince = runningSince();
     const lastBlock = lastCycle
-      ? `<h2>Последний прогон</h2>
+      ? `<h2>${busySince ? 'Идёт прогон' : 'Последний прогон'}</h2>
          <div class="card">
+           ${busySince
+             ? `<p style="margin:0 0 10px">Прогон идёт с ${esc(formatDate(busySince))}.
+                  Страница сама не обновляется - нажмите F5, чтобы увидеть новые слоты.
+                  Вкладку можно закрыть, прогон от этого не остановится.</p>`
+             : ''}
            <table>
              <tr><th>Прогон</th><td>#${lastCycle.id} ${runKindText(lastCycle.kind)},
                ${runStatusTag(lastCycle.status)}</td></tr>
@@ -1221,32 +1227,44 @@ export function panelRouter() {
     return `<div class="card">
         <p style="margin:0 0 10px">Квоты на сегодня: ${quotas}</p>
         <p class="hint" style="margin:0 0 10px">
-          Времена слотов считаются от окна публикаций ${esc(map.posting_window_start)}-${
+          ${plan.stepMinutes
+            ? `Тестовая раскладка: слоты идут через ${esc(plan.stepMinutes)} мин от запуска,
+               окно публикаций не применяется. Поставьте 0 в поле ниже, чтобы вернуть
+               обычный режим.`
+            : `Времена слотов считаются от окна публикаций ${esc(map.posting_window_start)}-${
             esc(map.posting_window_end)} МСК${
             map.schedule_mode === 'interval'
               ? `, но не дальше чем на ${esc(map.schedule_interval_hours)} ч от старта:
                  при расписании «каждые ${esc(map.schedule_interval_hours)} ч» посты должны
                  уложиться до следующего прогона`
               : ' (расписание «раз в день» растягивает посты на всё окно)'
-          }. Если окно на сегодня уже закрыто, прогон встаёт на завтрашнее.
+          }. Если окно на сегодня уже закрыто, прогон встаёт на завтрашнее.`}
         </p>
         <table>
           <thead><tr><th>Слот</th><th>Группа</th><th>Материал</th><th>Время публикации</th></tr></thead>
           <tbody>${planRows}</tbody>
         </table>
         <div style="margin-top:14px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-          <form method="post" action="/run" style="display:flex;gap:8px;align-items:center">
+          <form method="post" action="/run" style="display:flex;gap:14px;align-items:center;flex-wrap:wrap">
             <label class="hint">не больше
               <input type="number" name="limit_per_group" min="1" max="100" value=""
                      placeholder="все" style="width:70px"> постов на группу</label>
-            <button type="submit"${plan.items.length ? '' : ' disabled'}>Запустить прогон</button>
+            <label class="hint">слот каждые
+              <input type="number" name="step_minutes" min="0" max="600"
+                     value="${esc(map.test_slot_step_minutes ?? '0')}" style="width:70px">
+              мин (0 - по окну публикаций)</label>
+            <button type="submit"${plan.items.length && !busySince ? '' : ' disabled'}>${
+              busySince ? 'Прогон уже идёт' : 'Запустить прогон'
+            }</button>
           </form>
         </div>
         <p class="hint" style="margin:10px 0 0">
           Один материал уходит ровно в одну группу, порядок внутри группы - от свежих
-          к старым, времена разнесены по слотам внутри окна публикаций. Прогон делает
-          всю цепочку: текст, обложка, публикация. Второй запуск во время первого
-          отклоняется.${plan.reason && plan.items.length ? ` ${esc(plan.reason)}` : ''}
+          к старым. Прогон делает всю цепочку: текст, обложка, публикация, и работает
+          в фоне - ждать страницу не нужно. Второй запуск во время первого отклоняется.
+          Поле «слот каждые N мин» - тестовая раскладка: публикации встают через N минут
+          от запуска в обход окна, чтобы проверить цикл целиком за минуты.${
+            plan.reason && plan.items.length ? ` ${esc(plan.reason)}` : ''}
         </p>
       </div>
       ${lastBlock}`;
@@ -1275,22 +1293,31 @@ export function panelRouter() {
       </table>`;
   }
 
-  // Ручной запуск прогона. Синхронный: человек в панели ждёт результат, а cron
-  // с тем же вызовом появится на этапе 9.
+  // Ручной запуск прогона — в фоне. Шесть слотов на живых провайдерах это 6-8 минут,
+  // держать всё это время HTTP-ответ нельзя: закрытая вкладка оборвала бы запрос.
+  // Прогресс виден в таблице слотов по обновлению страницы.
   router.post('/run', async (req, res) => {
     try {
       const raw = Number.parseInt(req.body.limit_per_group, 10);
       const limitPerGroup = Number.isNaN(raw) ? undefined : raw;
-      const result = await runCycle({ kind: 'manual', limitPerGroup });
-      const summary =
-        `Прогон #${result.runId}${result.resumed ? ' (продолжен)' : ''}: опубликовано ` +
-        `${result.published} из ${result.planned}` +
-        (result.generated ? `, сгенерировано ${result.generated}` : '') +
-        (result.failed ? `, сбоев ${result.failed}` : '') +
-        `, ${Math.round(result.ms / 1000)} c`;
-      res.redirect(`/?ok=${encodeURIComponent(summary)}`);
+      const step = Number.parseInt(req.body.step_minutes, 10);
+      // Шаг слотов сохраняем в настройки: он же применяется к плану, который панель
+      // показывает до запуска, и к прогону по расписанию на этапе 9.
+      if (!Number.isNaN(step)) {
+        await settings.set('test_slot_step_minutes', String(Math.max(0, Math.min(600, step))));
+      }
+
+      const { started, reason } = startCycleInBackground({ kind: 'manual', limitPerGroup });
+      if (!started) throw new Error(reason);
+
+      logger.info({ кто: req.user.login, лимит: limitPerGroup ?? 'по группам' }, 'Прогон запущен из панели');
+      res.redirect(
+        `/?ok=${encodeURIComponent(
+          'Прогон запущен в фоне. Обновляйте страницу: состояние слотов видно в таблице ниже.',
+        )}`,
+      );
     } catch (error) {
-      logger.error(errFields(error), 'Прогон из панели упал');
+      logger.error(errFields(error), 'Запуск прогона из панели упал');
       res.redirect(`/?err=${encodeURIComponent(error.message)}`);
     }
   });

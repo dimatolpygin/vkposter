@@ -78,6 +78,9 @@ export function scheduleText(settingsMap) {
  * @param {number} [options.maxSpanMinutes] не растягивать дальше, чем на столько минут
  *   от начала: при расписании «каждые N часов» посты должны уложиться до следующего
  *   прогона, иначе слоты соседних прогонов наложатся друг на друга
+ * @param {number} [options.stepMinutes] тестовая раскладка: слоты идут строго через
+ *   столько минут от «сейчас», окно публикаций игнорируется. Нужно, чтобы проверить
+ *   весь цикл за минуты, а не ждать вечернего слота.
  * @returns {Date[]} времена по возрастанию, минуты не повторяются
  */
 export function slotTimes(count, {
@@ -87,8 +90,17 @@ export function slotTimes(count, {
   leadMinutes = 3,
   jitterMinutes = 7,
   maxSpanMinutes = null,
+  stepMinutes = null,
 } = {}) {
   if (count <= 0) return [];
+
+  // Тестовая раскладка: ни окна, ни джиттера — предсказуемые «через 3, 6, 9 минут».
+  if (stepMinutes) {
+    const step = Math.max(1, stepMinutes) * 60_000;
+    const first = now.getTime() + Math.max(1, leadMinutes) * 60_000;
+    return Array.from({ length: count }, (_, index) =>
+      new Date(Math.floor((first + step * index) / 60_000) * 60_000));
+  }
 
   const earliest = new Date(now.getTime() + leadMinutes * 60_000);
   let start = atTime(now, parseHhMm(windowStart, '10:00'));

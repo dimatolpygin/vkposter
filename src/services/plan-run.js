@@ -28,8 +28,10 @@ const logger = log('план');
  * @param {Date} [options.now]
  * @param {number[]} [options.groupIds] ограничить план этими группами (ручной прогон)
  * @param {number} [options.limitPerGroup] жёсткий потолок на группу (проверка, демо)
+ * @param {number} [options.stepMinutes] тестовая раскладка слотов: через N минут от «сейчас»,
+ *   в обход окна публикаций (настройка `test_slot_step_minutes`)
  */
-export async function buildPlan({ now = new Date(), groupIds, limitPerGroup } = {}) {
+export async function buildPlan({ now = new Date(), groupIds, limitPerGroup, stepMinutes } = {}) {
   const targets = groupIds?.length ? await groups.findByIds(groupIds) : await groups.listActive();
   const active = targets.filter((group) => group.is_active);
 
@@ -113,6 +115,7 @@ export async function buildPlan({ now = new Date(), groupIds, limitPerGroup } = 
   // При расписании «каждые N часов» посты растягиваются максимум до следующего прогона:
   // иначе слоты соседних прогонов лягут друг на друга в одном и том же окне.
   const map = await settings.getMap();
+  const testStep = stepMinutes ?? Number.parseInt(map.test_slot_step_minutes ?? '0', 10) ?? 0;
   const maxSpanMinutes = map.schedule_mode === 'interval'
     ? Math.max(1, Number.parseInt(map.schedule_interval_hours ?? '5', 10) || 5) * 60
     : null;
@@ -124,6 +127,7 @@ export async function buildPlan({ now = new Date(), groupIds, limitPerGroup } = 
     leadMinutes: Number.parseInt(map.publish_delay_minutes ?? '3', 10) || 3,
     jitterMinutes: Number.parseInt(map.slot_jitter_minutes ?? '7', 10) || 7,
     maxSpanMinutes,
+    stepMinutes: testStep > 0 ? testStep : null,
   });
 
   const items = assignments.map((assignment, index) => ({
@@ -147,6 +151,7 @@ export async function buildPlan({ now = new Date(), groupIds, limitPerGroup } = 
   return {
     items,
     groups: quotas,
+    stepMinutes: testStep > 0 ? testStep : null,
     reason: items.length < capacity
       ? `Материалов меньше плана: ${items.length} из ${capacity}. Добор старыми темами — этап 9.`
       : null,

@@ -29,14 +29,20 @@ const logger = log('прогон');
 const RUN_LOCK_KEY = 815_240_801;
 
 /**
+ * Текущий фоновый прогон в этом процессе. Хранится в памяти — панели этого достаточно,
+ * чтобы сразу сказать «уже идёт»; межпроцессная защита всё равно на advisory lock.
+ */
+let current = null;
+
+/**
  * @param {object} [options]
  * @param {'cron'|'manual'|'backfill'} [options.kind] чем инициирован прогон
  * @param {number[]} [options.groupIds] ограничить группами (ручной прогон)
  * @param {number} [options.limitPerGroup] потолок постов на группу (проверка, демо)
  */
-export async function runCycle({ kind = 'manual', groupIds, limitPerGroup } = {}) {
+export async function runCycle({ kind = 'manual', groupIds, limitPerGroup, stepMinutes } = {}) {
   const { acquired, result } = await withAdvisoryLock(RUN_LOCK_KEY, () =>
-    executeCycle({ kind, groupIds, limitPerGroup }),
+    executeCycle({ kind, groupIds, limitPerGroup, stepMinutes }),
   );
   if (!acquired) {
     throw new Error(
@@ -46,7 +52,43 @@ export async function runCycle({ kind = 'manual', groupIds, limitPerGroup } = {}
   return result;
 }
 
-async function executeCycle({ kind, groupIds, limitPerGroup }) {
+/**
+ * Тот же прогон, но в фоне: HTTP-ответ не ждёт ни генерации, ни обложек.
+ *
+ * Прогон из шести слотов на живых провайдерах — это 6-8 минут, столько держать
+ * страницу нельзя: человек закроет вкладку, запрос оборвётся. Здесь запуск только
+ * стартует работу, а прогресс виден в таблице слотов по обновлению страницы.
+ * Планировщик на этапе 9 будет вызывать ровно это.
+ *
+ * @returns {{started: boolean, reason?: string}} `started: false` — прогон уже идёт
+ */
+export function startCycleInBackground(options = {}) {
+  if (current) {
+    return { started: false, reason: 'Прогон уже идёт — дождитесь его окончания' };
+  }
+  const startedAt = Date.now();
+  const task = runCycle(options)
+    .then((result) => {
+      logger.info({ прогон: result.runId }, `Фоновый прогон #${result.runId} завершён`);
+      return result;
+    })
+    .catch((error) => {
+      logger.error(errFields(error), `Фоновый прогон упал: ${error.message}`);
+      return null;
+    })
+    .finally(() => {
+      current = null;
+    });
+  current = { startedAt, task };
+  return { started: true };
+}
+
+/** Идёт ли прогон прямо сейчас в этом процессе (для панели). */
+export function runningSince() {
+  return current ? new Date(current.startedAt) : null;
+}
+
+async function executeCycle({ kind, groupIds, limitPerGroup, stepMinutes }) {
   const requestId = getRequestId() ?? null;
   const startedAt = Date.now();
 
@@ -62,7 +104,7 @@ async function executeCycle({ kind, groupIds, limitPerGroup }) {
       `Найден незаконченный прогон #${run.id} — продолжаем его, новый план не строим`,
     );
   } else {
-    const plan = await buildPlan({ groupIds, limitPerGroup });
+    const plan = await buildPlan({ groupIds, limitPerGroup, stepMinutes });
     planReason = plan.reason;
     if (plan.items.length === 0) {
       throw new Error(plan.reason ?? 'Планировать нечего');
