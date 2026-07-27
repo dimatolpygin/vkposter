@@ -12,7 +12,7 @@ import * as publications from '../../repo/publications.js';
 import * as runs from '../../repo/runs.js';
 import { checkSource } from '../../services/check-source.js';
 import { buildPlan } from '../../services/plan-run.js';
-import { startCycleInBackground, runningSince } from '../../services/run-cycle.js';
+import { startCycleInBackground, runningSince, lastBackgroundError } from '../../services/run-cycle.js';
 import { nextRunAt, scheduleText } from '../../lib/schedule.js';
 import { generatePost } from '../../services/generate-post.js';
 import { generateImageForPost } from '../../services/generate-image.js';
@@ -1200,6 +1200,7 @@ export function panelRouter() {
       : 'нет включённых групп';
 
     const busySince = runningSince();
+    const bgError = !busySince ? lastBackgroundError() : null;
     const lastBlock = lastCycle
       ? `<h2>${busySince ? 'Идёт прогон' : 'Последний прогон'}</h2>
          <div class="card">
@@ -1225,6 +1226,10 @@ export function panelRouter() {
       : '';
 
     return `<div class="card">
+        ${bgError
+          ? `<p style="margin:0 0 10px"><span class="tag off">прогон не пошёл</span>
+               ${esc(bgError)}</p>`
+          : ''}
         <p style="margin:0 0 10px">Квоты на сегодня: ${quotas}</p>
         <p class="hint" style="margin:0 0 10px">
           ${plan.stepMinutes

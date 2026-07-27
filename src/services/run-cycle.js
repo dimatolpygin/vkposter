@@ -1,10 +1,11 @@
 import { withAdvisoryLock } from '../db/pool.js';
 import * as posts from '../repo/posts.js';
 import * as runs from '../repo/runs.js';
+import { publicBaseReachable } from '../lib/media.js';
 import { buildPlan } from './plan-run.js';
 import { generatePost } from './generate-post.js';
 import { generateImageForPost } from './generate-image.js';
-import { publishPost } from './publish-post.js';
+import { publishPost, usingLocalPmpStub } from './publish-post.js';
 import { getRequestId } from '../context.js';
 import { log, errFields } from '../logger.js';
 
@@ -33,6 +34,9 @@ const RUN_LOCK_KEY = 815_240_801;
  * чтобы сразу сказать «уже идёт»; межпроцессная защита всё равно на advisory lock.
  */
 let current = null;
+
+/** Последняя ошибка фонового прогона (в фоне её некому вернуть в HTTP-ответе). */
+let lastError = null;
 
 /**
  * @param {object} [options]
@@ -66,13 +70,26 @@ export function startCycleInBackground(options = {}) {
   if (current) {
     return { started: false, reason: 'Прогон уже идёт — дождитесь его окончания' };
   }
+
+  // Дешёвые проверки делаем синхронно, до ухода в фон: иначе человек увидит
+  // «прогон запущен», а причина отказа останется только в логе.
+  const reachable = publicBaseReachable();
+  if (!reachable.ok && !usingLocalPmpStub()) {
+    lastError = reachable.hint;
+    return { started: false, reason: reachable.hint };
+  }
+
   const startedAt = Date.now();
+  lastError = null;
   const task = runCycle(options)
     .then((result) => {
       logger.info({ прогон: result.runId }, `Фоновый прогон #${result.runId} завершён`);
       return result;
     })
     .catch((error) => {
+      // Прогон в фоне: ошибку некому вернуть в ответе, поэтому она оседает здесь
+      // и показывается в карточке прогона до следующего запуска.
+      lastError = error.message;
       logger.error(errFields(error), `Фоновый прогон упал: ${error.message}`);
       return null;
     })
@@ -88,9 +105,20 @@ export function runningSince() {
   return current ? new Date(current.startedAt) : null;
 }
 
+/** Ошибка последнего фонового прогона: ответа с ней не было, показываем в панели. */
+export function lastBackgroundError() {
+  return lastError;
+}
+
 async function executeCycle({ kind, groupIds, limitPerGroup, stepMinutes }) {
   const requestId = getRequestId() ?? null;
   const startedAt = Date.now();
+
+  // Предполёт. Генерация текста и обложек стоит денег, а публикация с локальным
+  // PUBLIC_BASE_URL не пройдёт никогда: postmypost скачивает картинку сам. Проверяем
+  // до первой траты, а не после шести.
+  const reachable = publicBaseReachable();
+  if (!reachable.ok && !usingLocalPmpStub()) throw new Error(reachable.hint);
 
   // Продолжение прерванного прогона имеет приоритет над новым планом: сначала доезжает
   // то, что уже распределено по группам и слотам.

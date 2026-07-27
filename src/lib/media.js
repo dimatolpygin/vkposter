@@ -22,6 +22,44 @@ const EXTENSIONS = {
   'image/webp': '.webp',
 };
 
+/**
+ * Виден ли наш публичный адрес из интернета.
+ *
+ * Дорогая грабля: `PUBLIC_BASE_URL=http://localhost:3000` в dev выглядит рабочим —
+ * картинка открывается в браузере, потому что браузер тоже локальный. Но обложку
+ * скачивает postmypost со своей стороны, и для него `localhost` — это он сам:
+ * публикация падает на `422 Не удалось загрузить файл по ссылке` уже после того,
+ * как потрачены кредиты на генерацию. Поэтому адрес проверяется до работы.
+ *
+ * @returns {{ok: boolean, host: string, hint?: string}}
+ */
+export function publicBaseReachable() {
+  let host = '';
+  try {
+    host = new URL(config.publicBaseUrl).hostname;
+  } catch {
+    return { ok: false, host: config.publicBaseUrl, hint: 'PUBLIC_BASE_URL не похож на адрес' };
+  }
+
+  const local = host === 'localhost'
+    || host === '::1'
+    || /^127\./.test(host)
+    || /^10\./.test(host)
+    || /^192\.168\./.test(host)
+    || /^172\.(1[6-9]|2\d|3[01])\./.test(host);
+
+  if (!local) return { ok: true, host };
+  return {
+    ok: false,
+    host,
+    hint:
+      `PUBLIC_BASE_URL указывает на «${host}» — этот адрес доступен только с вашей машины. ` +
+      'postmypost скачивает обложку сам, со своей стороны, и такую ссылку не откроет. ' +
+      'Поднимите туннель (рецепт в CLAUDE.md) и подставьте его адрес в PUBLIC_BASE_URL, ' +
+      'либо публикуйте с прода, где стоит домен.',
+  };
+}
+
 /** Имя месяца в МСК — контейнер живёт в Europe/Moscow, отдельный формат не нужен. */
 function monthDir(date = new Date()) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;

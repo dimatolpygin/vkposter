@@ -1,9 +1,10 @@
 import * as pmp from '../lib/postmypost.js';
-import { publicUrlFor } from '../lib/media.js';
+import { publicUrlFor, publicBaseReachable } from '../lib/media.js';
 import * as groups from '../repo/groups.js';
 import * as posts from '../repo/posts.js';
 import * as publications from '../repo/publications.js';
 import * as settings from '../repo/settings.js';
+import { config } from '../config.js';
 import { getRequestId } from '../context.js';
 import { log, errFields } from '../logger.js';
 
@@ -74,6 +75,11 @@ export async function publishPost(post, { groupIds, mode, postAt, ignoreDailyLim
   let fileId = await publications.fileIdForPost(post.id);
   const reused = Boolean(fileId);
   if (!fileId) {
+    // Проверка до заливки: локальный адрес postmypost не откроет, и вместо понятной
+    // причины мы получили бы «422 Не удалось загрузить файл по ссылке».
+    const reachable = publicBaseReachable();
+    if (!reachable.ok && !usingLocalPmpStub()) throw new Error(reachable.hint);
+
     // Адрес собирается заново из PUBLIC_BASE_URL: сохранённый в posts.image_url мог быть
     // записан, когда система жила на другом адресе (dev → туннель → домен на проде).
     const imageUrl = publicUrlFor(post) ?? post.image_url;
@@ -198,6 +204,14 @@ export async function publishPost(post, { groupIds, mode, postAt, ignoreDailyLim
     throw new Error(reasons || 'Публикация не удалась ни в одну группу');
   }
   return result;
+}
+
+/**
+ * Работаем ли против локальной заглушки postmypost. Ей `localhost` в адресе картинки
+ * не мешает: она ничего не скачивает, а проверять цикл на заглушке нужно уметь.
+ */
+export function usingLocalPmpStub() {
+  return /(^|\/\/)(localhost|127\.0\.0\.1)/.test(config.postmypost.baseUrl);
 }
 
 /** Первый готовый пост с обложкой → в группы. Кнопка в панели, дальше cron (этап 8). */
