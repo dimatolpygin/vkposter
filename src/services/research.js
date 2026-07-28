@@ -1,7 +1,7 @@
 import * as firecrawl from '../lib/firecrawl.js';
 import * as articles from '../repo/articles.js';
 import * as settings from '../repo/settings.js';
-import { projectSearchName } from '../lib/topic.js';
+import { projectSearchName, projectTokens } from '../lib/topic.js';
 import { captureError } from './capture-error.js';
 import { log, errFields } from '../logger.js';
 
@@ -72,7 +72,7 @@ export async function collectMaterial(article, { force = false } = {}) {
 
   try {
     let usedQuery = query;
-    let pages = await searchPages(query, limit, perPage);
+    let pages = await searchPages(query, limit, perPage, project);
 
     // Уточняющие слова иногда обнуляют выдачу: у малоизвестного проекта нет страниц,
     // где рядом стоят и название, и «обман», и «вывод денег». Повторяем одним
@@ -84,7 +84,7 @@ export async function collectMaterial(article, { force = false } = {}) {
         `Поиск по «${query}» пуст — повторяю по одному названию «${project}»`,
       );
       usedQuery = project;
-      pages = await searchPages(project, limit, perPage);
+      pages = await searchPages(project, limit, perPage, project);
     }
 
     if (pages.length === 0) {
@@ -118,12 +118,54 @@ export async function collectMaterial(article, { force = false } = {}) {
   }
 }
 
-/** Поиск + отбор страниц, из которых реально есть что взять. */
-async function searchPages(query, limit, perPage) {
+/**
+ * Поиск + отбор страниц, из которых реально есть что взять.
+ *
+ * Второй фильтр — на релевантность, и он здесь главный. Поисковик всегда что-нибудь
+ * возвращает: по неизвестному проекту в выдачу приходят общие статьи «как распознать
+ * мошенников» с РБК и YouTube. Отдать их модели как фактуру хуже, чем не искать вовсе:
+ * она аккуратно перенесёт в пост чужие детали (лицензии, суммы, страны) и получится
+ * убедительная выдумка про конкретный проект. Поэтому берём только страницы,
+ * где название проекта действительно упоминается.
+ */
+async function searchPages(query, limit, perPage, project) {
   const found = await firecrawl.search(query, { limit });
-  return found
-    .map((page) => ({ ...page, text: cleanPage(page.markdown).slice(0, perPage) }))
-    .filter((page) => page.text.length >= MIN_USEFUL_CHARS);
+  const { words } = projectTokens(project);
+  const needles = words
+    .map((word) => word.toLowerCase())
+    .filter((word) => word.length >= 4);
+
+  const pages = [];
+  let dropped = 0;
+  for (const page of found) {
+    const text = cleanPage(page.markdown).slice(0, perPage);
+    if (text.length < MIN_USEFUL_CHARS) { dropped += 1; continue; }
+    if (!isAboutProject(text, page.title, needles)) { dropped += 1; continue; }
+    pages.push({ ...page, text });
+  }
+  if (dropped > 0) {
+    logger.info(
+      { запрос: query, отброшено: dropped, принято: pages.length },
+      `Поиск «${query}»: отброшено ${dropped} страниц не про проект`,
+    );
+  }
+  return pages;
+}
+
+/**
+ * Страница действительно про этот проект: название встречается дважды в тексте
+ * либо один раз в заголовке. Одного упоминания в теле мало — так выглядит перечисление
+ * в списке «ещё 200 сомнительных сайтов», фактуры там нет.
+ */
+function isAboutProject(text, title, needles) {
+  if (needles.length === 0) return true;
+  const haystack = text.toLowerCase();
+  const heading = String(title ?? '').toLowerCase();
+  return needles.some((needle) => {
+    if (heading.includes(needle)) return true;
+    const first = haystack.indexOf(needle);
+    return first !== -1 && haystack.indexOf(needle, first + needle.length) !== -1;
+  });
 }
 
 /**
