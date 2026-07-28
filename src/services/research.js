@@ -130,17 +130,26 @@ export async function collectMaterial(article, { force = false } = {}) {
  */
 async function searchPages(query, limit, perPage, project) {
   const found = await firecrawl.search(query, { limit });
+  // Домен в названии — самый надёжный признак: «merabo.ru» встречается только там,
+  // где речь именно о нём. Без домена ловятся однокоренные чужие компании: по слову
+  // «merabo» в выдачу пришла индийская «Merabo Labs», к проекту отношения не имеющая.
+  const domains = project
+    .split(/\s+/)
+    .filter((part) => /[\p{L}\p{N}]\.[\p{L}]{2,}/u.test(part))
+    .map((part) => part.toLowerCase());
   const { words } = projectTokens(project);
-  const needles = words
-    .map((word) => word.toLowerCase())
-    .filter((word) => word.length >= 4);
+  const needles = domains.length > 0
+    ? domains
+    : words.map((word) => word.toLowerCase()).filter((word) => word.length >= 4);
+  // Домену хватает одного упоминания, отдельному слову — двух.
+  const minHits = domains.length > 0 ? 1 : 2;
 
   const pages = [];
   let dropped = 0;
   for (const page of found) {
     const text = cleanPage(page.markdown).slice(0, perPage);
     if (text.length < MIN_USEFUL_CHARS) { dropped += 1; continue; }
-    if (!isAboutProject(text, page.title, needles)) { dropped += 1; continue; }
+    if (!isAboutProject(text, page.title, needles, minHits)) { dropped += 1; continue; }
     pages.push({ ...page, text });
   }
   if (dropped > 0) {
@@ -153,18 +162,26 @@ async function searchPages(query, limit, perPage, project) {
 }
 
 /**
- * Страница действительно про этот проект: название встречается дважды в тексте
- * либо один раз в заголовке. Одного упоминания в теле мало — так выглядит перечисление
- * в списке «ещё 200 сомнительных сайтов», фактуры там нет.
+ * Страница действительно про этот проект. Порог упоминаний зависит от того, что ищем:
+ * домен опознаёт проект однозначно и достаточно одного, а отдельное слово названия
+ * требует двух — одно упоминание так выглядит перечисление в списке «ещё 200
+ * сомнительных сайтов», фактуры там нет.
  */
-function isAboutProject(text, title, needles) {
+function isAboutProject(text, title, needles, minHits) {
   if (needles.length === 0) return true;
   const haystack = text.toLowerCase();
   const heading = String(title ?? '').toLowerCase();
   return needles.some((needle) => {
     if (heading.includes(needle)) return true;
-    const first = haystack.indexOf(needle);
-    return first !== -1 && haystack.indexOf(needle, first + needle.length) !== -1;
+    let hits = 0;
+    let from = 0;
+    for (;;) {
+      const at = haystack.indexOf(needle, from);
+      if (at === -1) return false;
+      hits += 1;
+      if (hits >= minHits) return true;
+      from = at + needle.length;
+    }
   });
 }
 

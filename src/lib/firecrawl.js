@@ -58,7 +58,7 @@ export async function scrape(url, { onlyMainContent = true, includeLinks = false
  * Отсекаем на стороне поиска — это дешевле, чем скачивать и выбрасывать.
  */
 const NO_TEXT_DOMAINS = [
-  'youtube.com', 'youtu.be', 'facebook.com', 'instagram.com', 'tiktok.com',
+  'youtube.com', 'youtu.be', 'rutube.ru', 'dzen.ru', 'facebook.com', 'instagram.com', 'tiktok.com',
   'twitter.com', 'x.com', 'vk.com', 'ok.ru', 'pinterest.com', 't.me',
 ];
 
