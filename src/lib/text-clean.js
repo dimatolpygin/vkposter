@@ -15,6 +15,8 @@
  * в готовом тексте не остаётся вообще — требование заказчика.
  */
 
+import { projectTokens, foldLatin } from './topic.js';
+
 /** Строка-булит: тире (или дефис) с пробелом в начале строки. Сам булит сохраняем. */
 const BULLET_LINE = /^(\s*)[—–-]\s+/;
 
@@ -167,16 +169,30 @@ export function validatePost(text, { minChars, maxChars, adLink, topicName }) {
 /**
  * Название проекта в первом абзаце. Сравнение нежёсткое: модель пишет «PipNest Markets»,
  * «Пипнест» или «pipnest markets» — требовать точного совпадения строки бессмысленно.
- * Достаточно самого длинного слова названия (от 4 букв) или названия без пробелов.
+ *
+ * Совпадением считается ЛЮБОЕ значимое слово названия, а не самое длинное. Раньше
+ * бралось самое длинное — и на живом прогоне это забраковало три подряд нормальных
+ * поста: тема пришла slug'ом «xrp-turbo-io-razoblachenie», самым длинным словом
+ * оказалось «razoblachenie», а в тексте, разумеется, было «XRP Turbo».
+ * Жанровые слова и доменные зоны выброшены (см. projectTokens): по ним проверять
+ * нечего. Если после чистки значимых слов не осталось — проверку не применяем:
+ * брак поста из-за мусорного названия темы был бы наказанием не за то.
  */
 function mentionsProject(paragraph, topicName) {
   const haystack = paragraph.replace(/[^\p{L}\p{N}]+/gu, '').toLowerCase();
-  const name = String(topicName).toLowerCase();
-  const compact = name.replace(/[^\p{L}\p{N}]+/gu, '');
+  const { words, folded } = projectTokens(topicName);
+  if (words.length === 0) return true;
+
+  const compact = words.join('').toLowerCase();
   if (compact.length >= 4 && haystack.includes(compact)) return true;
 
-  const words = name.split(/[^\p{L}\p{N}]+/u).filter((word) => word.length >= 4);
-  if (words.length === 0) return paragraph.includes(name);
-  const longest = words.sort((a, b) => b.length - a.length)[0];
-  return haystack.includes(longest);
+  // Транслит с обеих сторон: название латиницей, а пост кириллицей (и наоборот) —
+  // обычное дело, «Atlas capital» против «Атлас Капитал».
+  const haystackFolded = foldLatin(haystack);
+  return words.some((word, index) => {
+    const value = word.toLowerCase();
+    if (value.length >= 4 && haystack.includes(value)) return true;
+    const key = folded[index];
+    return key.length >= 4 && haystackFolded.includes(key);
+  });
 }

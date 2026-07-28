@@ -698,7 +698,7 @@ export function panelRouter() {
                  Обложка делается через kie.ai и складывается в наш /media —
                  временную ссылку провайдера в postmypost отдавать нельзя, она истекает.</p>
                <form method="post" action="/posts/${nextWithoutImage.id}/image">
-                 <button type="submit">Сгенерировать обложку</button>
+                 <button type="submit" data-busy="Рисую обложку…">Сгенерировать обложку</button>
                </form>
                ${nextWithoutImage.image_error
                  ? `<p class="hint" style="margin:10px 0 0">Прошлая попытка:
@@ -723,7 +723,7 @@ export function panelRouter() {
                  ${nextArticle.content ? `текст ${nextArticle.content.length} симв.` : 'только тема'} ·
                  <a href="${esc(nextArticle.url)}" target="_blank" rel="noopener">${esc(nextArticle.url)}</a></p>
                <form method="post" action="/posts/generate">
-                 <button type="submit">Сгенерировать пост</button>
+                 <button type="submit" data-busy="Генерирую пост…">Сгенерировать пост</button>
                </form>`
             : '<p class="hint" style="margin:0">Материалов, готовых к генерации, нет. ' +
               'Проверьте источники в разделе «Источники».</p>'}
@@ -926,7 +926,7 @@ export function panelRouter() {
                   : ''
               }</p>`}
           <form method="post" action="/posts/${post.id}/image" style="margin-top:10px">
-            <button ${post.image_url ? 'class="ghost"' : ''} type="submit">${
+            <button ${post.image_url ? 'class="ghost"' : ''} type="submit" data-busy="Рисую обложку…">${
               post.image_url ? 'Сгенерировать заново' : 'Сгенерировать обложку'
             }</button>
           </form>
@@ -1225,7 +1225,7 @@ export function panelRouter() {
               <label class="hint"><input type="checkbox" name="force" value="1">
                 писать, даже если про эту тему уже был пост</label>
               <div>
-                <button type="submit">Сгенерировать пост</button>
+                <button type="submit" data-busy="Генерирую пост…">Сгенерировать пост</button>
                 <span class="hint" style="margin-left:8px">займёт 20-60 секунд:
                   текст и обложка делаются сразу</span>
               </div>
@@ -1903,7 +1903,7 @@ export function panelRouter() {
 
     return `<form method="post" action="/posts/${post.id}/publish">
         <div style="margin:0 0 10px">${checks}</div>
-        <button type="submit">${
+        <button type="submit" data-busy="Отправляю в postmypost…">${
           mode === 'live' ? 'Опубликовать на стену' : 'Создать черновик в postmypost'
         }</button>
         <span class="hint" style="margin-left:8px">режим: ${publishModeTag(mode)}</span>
@@ -2017,7 +2017,7 @@ export function panelRouter() {
               <input type="number" name="step_minutes" min="0" max="600"
                      value="${esc(map.test_slot_step_minutes ?? '0')}" style="width:70px">
               мин (0 - по окну публикаций)</label>
-            <button type="submit"${plan.items.length && !busySince ? '' : ' disabled'}>${
+            <button type="submit" data-busy="Запускаю прогон…"${plan.items.length && !busySince ? '' : ' disabled'}>${
               busySince ? 'Прогон уже идёт' : 'Запустить прогон'
             }</button>
           </form>

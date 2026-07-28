@@ -1,5 +1,6 @@
 import * as openrouter from '../lib/openrouter.js';
 import { cleanPostText, validatePost } from '../lib/text-clean.js';
+import { projectDisplayName } from '../lib/topic.js';
 import * as prompts from '../repo/prompts.js';
 import * as posts from '../repo/posts.js';
 import * as settings from '../repo/settings.js';
@@ -33,7 +34,12 @@ const MAX_SOURCE_CHARS = 12_000;
  * когда провайдеры включат кеш промта).
  */
 function buildUserMessage(article) {
-  const project = article.topic_name || article.title || article.topic_key;
+  // Название чистим: при обнаружении через sitemap тема равна slug'у адреса
+  // («xrp-turbo-io-razoblachenie»), и в промт уходил жанровый хвост. Модель начинала
+  // выкручиваться и склоняла «разоблачение» как часть имени проекта.
+  const project = projectDisplayName(article.topic_name)
+    || article.title
+    || article.topic_key;
   const lines = [`Проект: ${project}`];
   if (article.url) lines.push(`Источник: ${article.url}`);
 

@@ -97,6 +97,44 @@ const STYLES = `
 
 /** Страница внутри панели: сайдбар + контент. */
 /**
+ * Занятость формы: нажатая кнопка гаснет и говорит, что происходит.
+ *
+ * Панель работает без ajax — генерация поста это обычный POST, который живёт
+ * десятки секунд (модель + валидация + до трёх повторов). Без индикации кнопка
+ * выглядит нерабочей, и её жмут повторно: получается второй прогон генерации
+ * за те же деньги.
+ *
+ * Тонкости, которые легко потерять:
+ *   - `disabled` ставится через setTimeout, а НЕ сразу: отключённая кнопка не попадает
+ *     в тело запроса, а половина форм панели различает действия именно по `name`
+ *     кнопки. Ставим после того, как браузер собрал данные формы.
+ *   - Возврат «назад» отдаёт страницу из bfcache в том же состоянии — на `pageshow`
+ *     всё возвращается, иначе кнопка остаётся серой навсегда.
+ *   - Текст берётся из `data-busy` кнопки, если он там задан.
+ */
+const BUSY_SCRIPT = `
+document.addEventListener('submit', function (event) {
+  if (event.defaultPrevented) return;
+  var form = event.target;
+  var button = event.submitter || form.querySelector('button[type=submit], button:not([type])');
+  if (!button || button.dataset.busyOn) return;
+  button.dataset.busyOn = '1';
+  button.dataset.busyText = button.textContent;
+  button.textContent = button.dataset.busy || 'Выполняется…';
+  document.documentElement.style.cursor = 'progress';
+  setTimeout(function () { button.disabled = true; }, 0);
+});
+window.addEventListener('pageshow', function () {
+  document.documentElement.style.cursor = '';
+  document.querySelectorAll('button[data-busy-on]').forEach(function (button) {
+    button.disabled = false;
+    button.textContent = button.dataset.busyText;
+    delete button.dataset.busyOn;
+  });
+});
+`;
+
+/**
  * Версия выката в подвале. Значение приходит из APP_REVISION — его подставляет
  * `deploy/deploy.sh` из `git rev-parse --short HEAD`. Это та самая видимая строка,
  * по которой на приёмке проверяется, что пуш в `master` доехал до прода сам.
@@ -142,6 +180,7 @@ export function page({ title, active, user, heading, sub, body, message }) {
     ${body}
   </main>
 </div>
+<script>${BUSY_SCRIPT}</script>
 </body>
 </html>`;
 }

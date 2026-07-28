@@ -154,6 +154,51 @@ function fold(key) {
     .replace(/(.)\1+/g, '$1');
 }
 
+/**
+ * Текст в свёрнутом транслите — для сравнений «кириллица против латиницы»
+ * за пределами этого модуля (проверка поста в text-clean).
+ */
+export function foldLatin(text) {
+  return fold(translit(String(text ?? '')));
+}
+
+/**
+ * Значимые слова названия — то, что реально называет проект, без жанрового хвоста.
+ *
+ * Название темы часто равно slug'у адреса («xrp-turbo-io-razoblachenie»): при
+ * обнаружении через sitemap заголовка ещё нет. Для сверки дублей это неважно,
+ * а вот проверять по такой строке текст поста нельзя — модель пишет «XRP Turbo»
+ * и никогда не напишет «razoblachenie». Возвращаем и исходные слова, и свёрнутый
+ * транслит: название бывает латиницей, а пост — кириллицей, и наоборот.
+ *
+ * @returns {{words: string[], folded: string[]}}
+ */
+export function projectTokens(name) {
+  if (!name) return { words: [], folded: [] };
+  const words = String(name)
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter(Boolean)
+    .filter((word) => {
+      const latin = translit(word.toLowerCase());
+      return !NOISE.has(latin) && !TLDS.has(latin);
+    });
+  return {
+    words,
+    folded: words.map((word) => fold(translit(word.toLowerCase()))),
+  };
+}
+
+/**
+ * Название проекта в человеческом виде — для промта и заголовков в панели.
+ * «xrp-turbo-io-razoblachenie» → «xrp turbo». Если после чистки не остаётся ничего
+ * (название целиком из шума), отдаём исходную строку: пусть лучше некрасиво, чем пусто.
+ */
+export function projectDisplayName(name) {
+  const { words } = projectTokens(name);
+  if (words.length === 0) return name ?? null;
+  return words.slice(0, MAX_TOKENS).join(' ');
+}
+
 function keyFromText(text) {
   if (!text) return null;
   const tokens = tokenize(text).filter((token) => !NOISE.has(token) && !TLDS.has(token));
