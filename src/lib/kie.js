@@ -38,8 +38,10 @@ export class KieError extends Error {
    *   Отличать от таймаута: там задача жива и результат ещё может появиться, поэтому
    *   taskId нужно сохранить и дочитать, а не платить за новую генерацию.
    */
-  constructor(message, { code, taskId, taskDead = false } = {}) {
-    super(message);
+  constructor(message, { code, taskId, taskDead = false, cause } = {}) {
+    // cause держим ради журнала ошибок: в исходном HttpError лежит тело ответа
+    // провайдера, а по нему и видно, за что kie.ai отказал.
+    super(message, cause ? { cause } : undefined);
     this.name = 'KieError';
     this.code = code;
     this.taskId = taskId;
@@ -78,7 +80,10 @@ async function call(method, path, { json, retries = 2 } = {}) {
     });
   } catch (error) {
     if (error instanceof HttpError) {
-      throw new KieError(`kie.ai ${error.status}: ${describeBody(error.body)}`, { code: error.status });
+      throw new KieError(`kie.ai ${error.status}: ${describeBody(error.body)}`, {
+        code: error.status,
+        cause: error,
+      });
     }
     throw error;
   }

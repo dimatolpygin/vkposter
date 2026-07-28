@@ -49,16 +49,22 @@ export async function captureError(stage, error, extra = {}) {
   }
 }
 
-/** Развернуть цепочку `cause` до сетевой ошибки — там весь контекст провайдера. */
+/**
+ * Развернуть цепочку `cause` до сетевой ошибки — там весь контекст провайдера.
+ * `HttpError` в приоритете над ошибкой клиента: у него есть ещё и адрес запроса,
+ * а клиенты (`PmpError`, `KieError`) переносят на себя только статус и тело.
+ */
 function findHttpError(error) {
+  let fallback = null;
   let current = error;
   for (let depth = 0; current && depth < 5; depth += 1) {
     if (current instanceof HttpError) return current;
-    // Клиенты провайдеров кладут поля прямо на свою ошибку (PmpError.status/body).
-    if (current.status !== undefined && current.body !== undefined) return current;
+    if (!fallback && current.status !== undefined && current.body !== undefined) {
+      fallback = current;
+    }
     current = current.cause;
   }
-  return null;
+  return fallback;
 }
 
 function shorten(body) {

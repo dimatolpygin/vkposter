@@ -235,6 +235,7 @@ export function debugRouter() {
    *   .../_debug/pmp/fail2/...       первые 2 запроса /upload/init отдают 503 (ретраи)
    *   .../_debug/pmp/pubfail/...     создание публикации отдаёт 422 (сбой одной группы)
    *   .../_debug/pmp/delete422/...   удаление отдаёт известный баг 422 при успехе
+   *   .../_debug/pmp/vklink/...      публикация отдаёт адрес записи на стене ВК
    * Флаги сочетаются через дефис.
    */
   let pmpUploads = 0;
@@ -315,6 +316,24 @@ export function debugRouter() {
       publication_status: req.body?.publication_status,
       post_at: req.body?.post_at,
       account_ids: req.body?.account_ids,
+    }]);
+  });
+
+  /**
+   * Публикация целиком. Нужна разделу «Опубликовано»: адрес записи на стене живой API
+   * отдаёт только после реальной публикации, и без флага заглушка ведёт себя так же —
+   * ссылки в ответе нет. Флаг `vklink` изображает уже вышедший пост.
+   */
+  router.get(pmpPath('/publications/:id'), (req, res) => {
+    const id = Number.parseInt(req.params.id, 10);
+    const published = pmpFlags(req).includes('vklink');
+    return res.json([{
+      id,
+      publication_status: published ? 1 : 4,
+      details: [{
+        publication_type: 1,
+        ...(published ? { link: `https://vk.com/wall-100001_${id % 10_000}` } : {}),
+      }],
     }]);
   });
 

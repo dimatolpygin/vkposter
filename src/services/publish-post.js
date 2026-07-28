@@ -211,7 +211,12 @@ export async function publishPost(post, { groupIds, mode, postAt, ignoreDailyLim
 
   if (done.length === 0) {
     const reasons = failed.map((item) => `${item.group.name}: ${item.error.message}`).join('; ');
-    throw new Error(reasons || 'Публикация не удалась ни в одну группу');
+    const aggregate = new Error(reasons || 'Публикация не удалась ни в одну группу');
+    // Сбой по каждой группе уже записан в журнал выше — вместе с сервисом, телом
+    // ответа и номером группы. Эта ошибка только сводная: без пометки прогон записал бы
+    // её вторым, более бедным дублем.
+    aggregate.captured = failed.length > 0;
+    throw aggregate;
   }
   return result;
 }

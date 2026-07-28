@@ -38,8 +38,8 @@ const UPLOAD_FAILED = 2;
 export const CONNECTION_OK = 1;
 
 export class PmpError extends Error {
-  constructor(message, { status, body } = {}) {
-    super(message);
+  constructor(message, { status, body, cause } = {}) {
+    super(message, cause ? { cause } : undefined);
     this.name = 'PmpError';
     this.status = status;
     this.body = body;
@@ -78,9 +78,12 @@ async function call(method, path, { json, retries = 2 } = {}) {
     });
   } catch (error) {
     if (error instanceof HttpError) {
+      // cause сохраняем ради журнала ошибок: в HttpError есть ещё и адрес запроса,
+      // а по нему в панели видно, на каком именно вызове API всё встало.
       throw new PmpError(`postmypost ${error.status}: ${describeBody(error.body)}`, {
         status: error.status,
         body: error.body,
+        cause: error,
       });
     }
     throw error;

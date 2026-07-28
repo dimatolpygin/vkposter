@@ -22,8 +22,9 @@ const logger = log('openrouter');
  */
 
 export class OpenRouterError extends Error {
-  constructor(message, { code } = {}) {
-    super(message);
+  constructor(message, { code, cause } = {}) {
+    // cause — ради журнала ошибок: тело ответа провайдера остаётся только там.
+    super(message, cause ? { cause } : undefined);
     this.name = 'OpenRouterError';
     this.code = code;
   }
@@ -98,7 +99,7 @@ export async function chat({
       const detail = parseErrorBody(error.body);
       throw new OpenRouterError(
         `OpenRouter ${error.status}: ${detail ?? 'без описания'}`,
-        { code: error.status },
+        { code: error.status, cause: error },
       );
     }
     throw error;
