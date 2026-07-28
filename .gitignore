@@ -10,3 +10,4 @@ coverage/
 dist/
 .DS_Store
 Thumbs.db
+.secrets/

@@ -58,8 +58,11 @@ services:
       POSTMYPOST_PROJECT_ID: ${POSTMYPOST_PROJECT_ID:-}
       POSTMYPOST_TIMEOUT_MS: ${POSTMYPOST_TIMEOUT_MS:-30000}
       TZ: Europe/Moscow
-    ports:
-      - "${APP_PORT:-3000}:3000"
+    # Публикация порта на хост живёт в файлах окружения, а не здесь: docker compose
+    # СКЛАДЫВАЕТ списки `ports` из нескольких файлов, а не заменяет. Стояло бы
+    # правило и тут, и в docker-compose.prod.yml — контейнер пытался бы занять 3000
+    # дважды и падал с «address already in use» на пустом сервере.
+    # dev → docker-compose.override.yml, прод → docker-compose.prod.yml (только 127.0.0.1).
     volumes:
       # Картинки постов должны переживать пересборку образа (этап 5)
       - media:/app/media

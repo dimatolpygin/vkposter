@@ -12,6 +12,9 @@ services:
       NODE_ENV: development
       LOG_LEVEL: ${LOG_LEVEL:-debug}
       LOG_PRETTY: "true"
+    # Панель доступна с хоста на http://localhost:3000 (см. комментарий в базовом файле)
+    ports:
+      - "${APP_PORT:-3000}:3000"
     volumes:
       - ./src:/app/src
       - ./docs:/app/docs
