@@ -53,6 +53,16 @@ export async function scrape(url, { onlyMainContent = true, includeLinks = false
 }
 
 /**
+ * Площадки, где вместо статьи приходит оболочка плеера или ленты: текста для фактуры
+ * там нет, а страница выглядит релевантной (название проекта в заголовке ролика).
+ * Отсекаем на стороне поиска — это дешевле, чем скачивать и выбрасывать.
+ */
+const NO_TEXT_DOMAINS = [
+  'youtube.com', 'youtu.be', 'facebook.com', 'instagram.com', 'tiktok.com',
+  'twitter.com', 'x.com', 'vk.com', 'ok.ru', 'pinterest.com', 't.me',
+];
+
+/**
  * Поиск в вебе с текстом найденных страниц (`POST /search`).
  *
  * Один вызов заменяет «поиск + N отдельных scrape»: если передать `scrapeOptions`,
@@ -75,7 +85,7 @@ export async function search(query, { limit = 3, withText = true, timeoutMs } = 
     `Расход лимита firecrawl: поиск «${query}» (до ${limit} результатов)`,
   );
 
-  const json = { query, limit };
+  const json = { query, limit, excludeDomains: NO_TEXT_DOMAINS };
   if (withText) {
     // Формат объектом, а не строкой: в v2 это единственная форма, которая
     // возвращает markdown вместе с результатами поиска.
