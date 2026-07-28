@@ -303,7 +303,38 @@ docker compose up -d
   а адрес поста подтягивается кнопкой «Найти ссылку» (`GET /publications/{id}`,
   адрес ищется по шаблону `vk.com/wall…` в ответе — имени поля в справочнике нет).
 
-## Прод
+## Прод (этап 12)
 
-- Сервер `193.17.95.226` (Ubuntu, 2 ядра / 2 ГБ), домен `probizn.website`.
-- Деплой — через навык `/okdeploy`, автодеплой GitHub Actions на пуш в `master`.
+- Сервер `193.17.95.226` (Ubuntu 24.04, 2 ядра / 2 ГБ), каталог `/opt/vkposter`,
+  домен `probizn.website` (A-запись уже на этот IP), панель — `https://probizn.website`.
+- Репозиторий `https://github.com/dimatolpygin/vkposter`. Ветка разработки `dev`,
+  ветка выката `master`. **Пуш в `master` = выкат на прод**, поэтому только по указанию.
+- Ключ доступа к серверу — `.secrets/deploy_key` (в git не попадает, он же в секретах Actions).
+
+```bash
+# прод запускается ДВУМЯ файлами, dev-овский override не подхватывать
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+# то же самое, но правильным способом — с ожиданием /health и подстановкой версии
+./deploy/deploy.sh          # выкатить то, что лежит в каталоге
+./deploy/deploy.sh --pull   # подтянуть origin/master и выкатить
+./scripts/install.sh        # первичная подготовка сервера, идемпотентно
+```
+
+- **`ports` в compose-файлах СКЛАДЫВАЮТСЯ, а не заменяются.** Поэтому публикация порта
+  живёт не в базовом файле, а в `docker-compose.override.yml` (dev, `0.0.0.0:3000`) и
+  `docker-compose.prod.yml` (прод, только `127.0.0.1:3000` — наружу ходит Caddy).
+  Правило в базовом файле давало «address already in use» на пустом сервере.
+- **Бит запуска у `.sh` хранится в git** (`git update-index --chmod=+x`). Файл, созданный
+  на Windows, приезжает как `644`, а `git reset --hard` в выкате отменяет `chmod` на сервере —
+  cron-бэкап после первого же деплоя падал бы с «Permission denied».
+- HTTPS делает Caddy (`deploy/Caddyfile`), сертификат Let's Encrypt выпускается сам;
+  тома `caddy_data`/`caddy_config` обязательны — без них сертификат перевыпускается
+  при каждом пересоздании контейнера и упирается в недельный лимит.
+- Версия выката видна в подвале панели (`APP_REVISION` — короткий хеш, подставляет
+  `deploy/deploy.sh`). Локально переменной нет, строка не показывается.
+- Бэкап базы: `deploy/backup-db.sh`, cron `/etc/cron.d/vkposter-backup` в 03:30 МСК,
+  дампы в `/opt/vkposter/backups`, хранение 14 дней, лог `/var/log/vkposter-backup.log`.
+- После перезагрузки сервера стек поднимается сам (`restart: unless-stopped` + docker в systemd),
+  миграции применяются на старте приложения.
+- На проде `NODE_ENV=production` → отладочные роуты `/_debug/*` не подключаются,
+  заглушки провайдеров недоступны. Все ключи в `.env` боевые.
