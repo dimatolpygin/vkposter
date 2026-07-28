@@ -51,7 +51,8 @@ export async function createFailed(row) {
 
 export async function findById(id) {
   const { rows } = await query(
-    `SELECT p.*, a.url AS article_url, a.topic_name, s.code AS source_code
+    `SELECT p.*, a.url AS article_url, a.topic_name, s.code AS source_code,
+            a.content_via, a.research_urls, a.research_at
        FROM posts p
        LEFT JOIN articles a ON a.id = p.article_id
        LEFT JOIN sources s ON s.id = a.source_id

@@ -423,6 +423,40 @@ export function panelRouter() {
           </form>
         </div>
         <div class="card">
+          <h2 style="margin-top:0">Сбор материала поиском</h2>
+          <p class="hint" style="margin:0 0 12px">
+            У части источников (scama.net, all-comment) своих текстов нет - только названия
+            проектов. Без поиска модель пишет о таком проекте по типичным схемам, без единого
+            проверяемого факта. С поиском перед генерацией собираются страницы из выдачи
+            firecrawl, и пост опирается на них; ссылки видны в карточке материала.
+            Каждая страница расходует лимит firecrawl (1000 запросов в месяц на проект),
+            поэтому число страниц - настройка, а не константа.
+          </p>
+          <form method="post" action="/settings/research">
+            <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end">
+              <label>режим<br>
+                <select name="research_mode">
+                  <option value="off"${map.research_mode === 'off' ? ' selected' : ''}>выключен</option>
+                  <option value="missing"${map.research_mode === 'missing' ? ' selected' : ''}>только для тем без текста</option>
+                  <option value="always"${map.research_mode === 'always' ? ' selected' : ''}>всегда</option>
+                </select></label>
+              <label>страниц из выдачи<br>
+                <input type="number" name="research_results" min="1" max="10"
+                       value="${esc(map.research_results)}" style="width:80px"></label>
+              <label>символов со страницы<br>
+                <input type="number" name="research_chars_per_page" min="500" max="20000" step="500"
+                       value="${esc(map.research_chars_per_page)}" style="width:110px"></label>
+              <label style="flex:1;min-width:280px">поисковый запрос<br>
+                <input type="text" name="research_query" value="${esc(map.research_query)}"></label>
+              <button type="submit">Сохранить</button>
+            </div>
+            <p class="hint" style="margin:10px 0 0">
+              В запросе <code>{{проект}}</code> подставляется названием темы. Формулировка
+              влияет на выдачу сильнее всего остального - её и стоит подбирать.
+            </p>
+          </form>
+        </div>
+        <div class="card">
           <h2 style="margin-top:0">Режим публикации</h2>
           <p style="margin:0 0 10px">Сейчас: ${publishModeTag(mode)}</p>
           <p class="hint" style="margin:0 0 12px">
@@ -588,6 +622,35 @@ export function panelRouter() {
       );
     } catch (error) {
       logger.error(errFields(error), 'Сохранение настроек постинга упало');
+      res.redirect(`/settings?err=${encodeURIComponent(error.message)}`);
+    }
+  });
+
+  router.post('/settings/research', async (req, res) => {
+    try {
+      const mode = String(req.body.research_mode ?? '').trim();
+      if (!['off', 'missing', 'always'].includes(mode)) {
+        throw new Error('Режим сбора материала: допустимы «выключен», «только для тем без текста», «всегда»');
+      }
+      const results = requireInt(req.body.research_results, 1, 10, 'Страниц из выдачи');
+      const chars = requireInt(req.body.research_chars_per_page, 500, 20_000, 'Символов со страницы');
+      const query = String(req.body.research_query ?? '').trim();
+      if (!query) throw new Error('Поисковый запрос не может быть пустым');
+      // Без подстановки запрос будет одинаковым для всех тем — искали бы всегда одно и то же.
+      if (!query.includes('{{проект}}')) {
+        throw new Error('В поисковом запросе обязателен {{проект}} — иначе он не зависит от темы');
+      }
+      await settings.set('research_mode', mode);
+      await settings.set('research_results', String(results));
+      await settings.set('research_chars_per_page', String(chars));
+      await settings.set('research_query', query);
+      logger.info(
+        { режим: mode, страниц: results, символов: chars, запрос: query, кто: req.user.login },
+        `Сбор материала: режим «${mode}», ${results} страниц по ${chars} символов`,
+      );
+      res.redirect(`/settings?ok=${encodeURIComponent(`Сбор материала: ${mode}, ${results} страниц`)}`);
+    } catch (error) {
+      logger.error(errFields(error), 'Сохранение настроек сбора материала упало');
       res.redirect(`/settings?err=${encodeURIComponent(error.message)}`);
     }
   });
@@ -888,6 +951,7 @@ export function panelRouter() {
             <tr><th>Тема</th><td><code>${esc(post.topic_key ?? '—')}</code></td></tr>
             <tr><th>Источник</th><td>${esc(post.source_code ?? '—')}
               ${post.article_url ? `<br><a href="${esc(post.article_url)}" target="_blank" rel="noopener" class="hint">${esc(post.article_url)}</a>` : ''}</td></tr>
+            <tr><th>Материал</th><td>${materialOrigin(post)}</td></tr>
             <tr><th>Модель</th><td>${esc(post.model ?? '—')} ${esc(post.provider ? `(${post.provider})` : '')}</td></tr>
             <tr><th>Версия промта</th><td>${esc(post.prompt_version ?? '—')}</td></tr>
             <tr><th>Токенов</th><td>вход ${esc(post.tokens_in ?? '—')}, выход ${esc(post.tokens_out ?? '—')}</td></tr>
@@ -2300,6 +2364,25 @@ function durationText(from, to) {
   const minutes = Math.floor(seconds / 60);
   if (minutes < 60) return `${minutes} мин ${seconds % 60} c`;
   return `${Math.floor(minutes / 60)} ч ${minutes % 60} мин`;
+}
+
+/**
+ * Откуда взялся материал поста. Для собранного поиском показываем ссылки: пост
+ * написан по чужим страницам, и клиент должен иметь возможность его проверить.
+ */
+function materialOrigin(post) {
+  if (post.content_via !== 'search') {
+    return post.article_url
+      ? 'статья источника'
+      : 'только тема, текста не было';
+  }
+  const urls = Array.isArray(post.research_urls) ? post.research_urls : [];
+  const list = urls
+    .map((url) => `<li><a href="${esc(url)}" target="_blank" rel="noopener">${esc(cut(url, 80))}</a></li>`)
+    .join('');
+  return `<span class="tag soon">собран поиском</span>
+    <span class="hint">${esc(formatDate(post.research_at))}</span>
+    ${list ? `<ul class="hint" style="margin:6px 0 0;padding-left:18px">${list}</ul>` : ''}`;
 }
 
 function cut(text, limit) {

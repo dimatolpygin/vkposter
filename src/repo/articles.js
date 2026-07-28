@@ -286,10 +286,29 @@ export async function saveContent(id, { title, text, publishedAt = null }) {
             title = COALESCE(NULLIF($3, ''), title),
             published_at = COALESCE($4, published_at),
             content_fetched_at = now(),
+            content_via = 'source',
             status = 'fetched',
             skip_reason = NULL
       WHERE id = $1`,
     [id, text, title ?? '', publishedAt],
+  );
+}
+
+/**
+ * Материал, собранный поиском (этап 13). Отдельно от `saveContent`: статус материала
+ * не меняем (он не «извлечён со страницы»), зато сохраняем ссылки — по ним клиент
+ * в панели проверяет, на чём основан пост.
+ */
+export async function saveResearch(id, { text, urls }) {
+  await query(
+    `UPDATE articles
+        SET content = $2,
+            content_via = 'search',
+            research_urls = $3::text[],
+            research_at = now(),
+            content_fetched_at = COALESCE(content_fetched_at, now())
+      WHERE id = $1`,
+    [id, text, urls],
   );
 }
 

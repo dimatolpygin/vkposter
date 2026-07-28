@@ -1,6 +1,7 @@
 import * as openrouter from '../lib/openrouter.js';
 import { cleanPostText, validatePost } from '../lib/text-clean.js';
 import { projectDisplayName } from '../lib/topic.js';
+import { collectMaterial } from './research.js';
 import * as prompts from '../repo/prompts.js';
 import * as posts from '../repo/posts.js';
 import * as settings from '../repo/settings.js';
@@ -33,7 +34,7 @@ const MAX_SOURCE_CHARS = 12_000;
  * и идёт первой (порядок «стабильное начало → переменная часть в конце» — на случай,
  * когда провайдеры включат кеш промта).
  */
-function buildUserMessage(article) {
+function buildUserMessage(article, { researched = false } = {}) {
   // Название чистим: при обнаружении через sitemap тема равна slug'у адреса
   // («xrp-turbo-io-razoblachenie»), и в промт уходил жанровый хвост. Модель начинала
   // выкручиваться и склоняла «разоблачение» как часть имени проекта.
@@ -44,8 +45,17 @@ function buildUserMessage(article) {
   if (article.url) lines.push(`Источник: ${article.url}`);
 
   if (article.content && article.content.trim().length > 200) {
-    lines.push('', 'Материал для рерайта (не копировать дословно):', '',
-      article.content.slice(0, MAX_SOURCE_CHARS));
+    lines.push(
+      '',
+      researched
+        // Найденное поиском — не одна статья, а выдержки с чужих сайтов. Просить
+        // «рерайт» такого текста нельзя: получится пересказ навигации трёх сайтов.
+        ? 'Собранная фактура из открытых источников (пиши свой текст по ней, ' +
+          'адреса и названия чужих сайтов в пост не переноси):'
+        : 'Материал для рерайта (не копировать дословно):',
+      '',
+      article.content.slice(0, MAX_SOURCE_CHARS),
+    );
   } else {
     // Режим «только тема»: у all-comment и scama.net текста нет, статью пишет модель сама.
     lines.push(
@@ -86,7 +96,13 @@ export async function generatePost(article, { interactive = false } = {}) {
   const serviceTier = interactive ? 'priority' : await settings.get('openrouter_service_tier', 'flex');
 
   const rules = { minChars, maxChars, adLink, topicName: article.topic_name || article.title };
-  const userMessage = buildUserMessage(article);
+
+  // Сбор материала поиском (этап 13). Идёт ДО генерации и только когда режим это
+  // разрешает: у тем без своей статьи иначе получается обзор «вообще», без фактов
+  // про конкретный проект. Не нашлось или упало — работаем как раньше, по теме.
+  const research = await collectMaterial(article);
+  const material = research ? { ...article, content: research.text } : article;
+  const userMessage = buildUserMessage(material, { researched: Boolean(research) });
 
   let lastProblems = [];
   let lastError;
