@@ -1,7 +1,7 @@
 import * as firecrawl from '../lib/firecrawl.js';
 import * as articles from '../repo/articles.js';
 import * as settings from '../repo/settings.js';
-import { projectDisplayName } from '../lib/topic.js';
+import { projectSearchName } from '../lib/topic.js';
 import { captureError } from './capture-error.js';
 import { log, errFields } from '../logger.js';
 
@@ -61,23 +61,35 @@ export async function collectMaterial(article, { force = false } = {}) {
     return null;
   }
 
-  const project = projectDisplayName(article.topic_name) || article.title || article.topic_key;
+  // Для поиска имя нужно с доменом: проект известен как «merabo.ru», а не «merabo».
+  const project = projectSearchName(article.topic_name) || article.title || article.topic_key;
   if (!project) return null;
 
   const limit = await settings.getInt('research_results', 3);
   const perPage = await settings.getInt('research_chars_per_page', 3000);
-  const template = await settings.get('research_query', '"{{проект}}" отзывы обман вывод денег');
+  const template = await settings.get('research_query', '{{проект}} отзывы обман вывод денег');
   const query = template.replaceAll('{{проект}}', project);
 
   try {
-    const found = await firecrawl.search(query, { limit });
-    const pages = found
-      .map((page) => ({ ...page, text: cleanPage(page.markdown).slice(0, perPage) }))
-      .filter((page) => page.text.length >= MIN_USEFUL_CHARS);
+    let usedQuery = query;
+    let pages = await searchPages(query, limit, perPage);
+
+    // Уточняющие слова иногда обнуляют выдачу: у малоизвестного проекта нет страниц,
+    // где рядом стоят и название, и «обман», и «вывод денег». Повторяем одним
+    // названием — это ещё один расход лимита, поэтому ровно одна попытка и только
+    // если первая дала пусто.
+    if (pages.length === 0 && query.trim() !== project.trim()) {
+      logger.info(
+        { материал: article.id, запрос: query },
+        `Поиск по «${query}» пуст — повторяю по одному названию «${project}»`,
+      );
+      usedQuery = project;
+      pages = await searchPages(project, limit, perPage);
+    }
 
     if (pages.length === 0) {
       logger.warn(
-        { материал: article.id, запрос: query, найдено: found.length },
+        { материал: article.id, запрос: usedQuery },
         `Поиск по «${project}» не дал пригодного текста — пост будет написан по теме`,
       );
       return null;
@@ -104,6 +116,14 @@ export async function collectMaterial(article, { force = false } = {}) {
     });
     return null;
   }
+}
+
+/** Поиск + отбор страниц, из которых реально есть что взять. */
+async function searchPages(query, limit, perPage) {
+  const found = await firecrawl.search(query, { limit });
+  return found
+    .map((page) => ({ ...page, text: cleanPage(page.markdown).slice(0, perPage) }))
+    .filter((page) => page.text.length >= MIN_USEFUL_CHARS);
 }
 
 /**

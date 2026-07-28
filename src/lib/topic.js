@@ -189,6 +189,30 @@ export function projectTokens(name) {
 }
 
 /**
+ * Название для поискового запроса. Отличается от `projectDisplayName` одним:
+ * доменная зона сохраняется, а точка не считается границей слова.
+ *
+ * Причина конкретная: тема «Отзывы о merabo.ru» после обычной чистки превращается
+ * в «merabo», и поиск по такому слову не находит ничего — проект известен именно
+ * как домен. А вот для сверки дублей и для проверки текста домен, наоборот, мешает
+ * («atlascapital.com» и «atlascapital» — один проект), поэтому функции две.
+ */
+export function projectSearchName(name) {
+  if (!name) return null;
+  const parts = String(name)
+    .split(/[\s\-_/\\|,;:()[\]"«»]+/u)
+    .filter(Boolean)
+    .filter((part) => {
+      const latin = translit(part.toLowerCase()).replace(/[^a-z0-9.]/g, '');
+      // Домен целиком (merabo.ru) шумом быть не может, даже если его часть похожа.
+      if (latin.includes('.')) return true;
+      return !NOISE.has(latin);
+    });
+  if (parts.length === 0) return String(name);
+  return parts.slice(0, MAX_TOKENS + 1).join(' ');
+}
+
+/**
  * Название проекта в человеческом виде — для промта и заголовков в панели.
  * «xrp-turbo-io-razoblachenie» → «xrp turbo». Если после чистки не остаётся ничего
  * (название целиком из шума), отдаём исходную строку: пусть лучше некрасиво, чем пусто.
