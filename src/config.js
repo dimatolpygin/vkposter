@@ -119,4 +119,9 @@ export const config = {
 
   // Публичный базовый URL — нужен на этапе 5, чтобы отдавать картинки в postmypost.
   publicBaseUrl: env('PUBLIC_BASE_URL', { fallback: 'http://localhost:3000' }),
+
+  // Короткий хеш выкаченного коммита: его подставляет deploy/deploy.sh перед
+  // `docker compose up`. Показывается в подвале панели — по нему видно, доехал ли
+  // автодеплой, не заходя на сервер. Локально пусто, и это нормально.
+  revision: env('APP_REVISION'),
 };

@@ -3,6 +3,8 @@
  * Панель служебная, страниц мало, зависимость не оправдана.
  */
 
+import { config } from '../../config.js';
+
 export function esc(value) {
   if (value === null || value === undefined) return '';
   return String(value)
@@ -94,6 +96,17 @@ const STYLES = `
 `;
 
 /** Страница внутри панели: сайдбар + контент. */
+/**
+ * Версия выката в подвале. Значение приходит из APP_REVISION — его подставляет
+ * `deploy/deploy.sh` из `git rev-parse --short HEAD`. Это та самая видимая строка,
+ * по которой на приёмке проверяется, что пуш в `master` доехал до прода сам.
+ * Локально переменной нет — строку не показываем вовсе.
+ */
+function revisionLine() {
+  if (!config.revision) return '';
+  return `<div style="margin-top:10px;font-size:12px">версия <code>${esc(config.revision)}</code></div>`;
+}
+
 export function page({ title, active, user, heading, sub, body, message }) {
   const nav = NAV.map(
     (item) =>
@@ -119,6 +132,7 @@ export function page({ title, active, user, heading, sub, body, message }) {
       <form method="post" action="/logout" style="margin-top:10px">
         <button class="ghost small" type="submit">Выйти</button>
       </form>
+      ${revisionLine()}
     </div>
   </aside>
   <main>
