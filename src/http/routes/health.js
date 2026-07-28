@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { config } from '../../config.js';
 import { pool } from '../../db/pool.js';
 import { getSchemaVersion } from '../../db/migrate.js';
 import { getRequestId } from '../../context.js';
@@ -25,6 +26,9 @@ export function healthRouter() {
       res.json({
         status: 'ok',
         service: 'vkposter',
+        // Версия выката. /health открыт без авторизации, поэтому по нему видно
+        // одним curl снаружи, доехал ли автодеплой, — не заходя в панель и на сервер.
+        version: config.revision ?? 'dev',
         uptime_sec: Math.round(process.uptime()),
         request_id: getRequestId(),
         ...checks,
