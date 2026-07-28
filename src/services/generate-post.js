@@ -3,6 +3,7 @@ import { cleanPostText, validatePost } from '../lib/text-clean.js';
 import * as prompts from '../repo/prompts.js';
 import * as posts from '../repo/posts.js';
 import * as settings from '../repo/settings.js';
+import { captureError } from './capture-error.js';
 import { log, errFields } from '../logger.js';
 import { getRequestId } from '../context.js';
 
@@ -179,6 +180,14 @@ export async function generatePost(article, { interactive = false } = {}) {
     error: reason,
   });
   logger.error({ материал: article.id, пост: failed.id, причина: reason }, `Генерация поста провалилась: ${reason}`);
+  // Записываем именно `lastError`, если он был: в нём тело ответа провайдера, а в `reason`
+  // только текст. Когда провайдер отвечал нормально, а брак дала валидация, сервиса нет.
+  await captureError('генерация текста', lastError ?? new Error(reason), {
+    service: lastError ? 'openrouter' : null,
+    details: lastError ? undefined : `Валидация не прошла: ${lastProblems.join('; ')}`,
+    articleId: article.id,
+    postId: failed.id,
+  });
   throw new Error(reason);
 }
 

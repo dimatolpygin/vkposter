@@ -124,6 +124,54 @@ export async function listRecent(limit = 30) {
   return rows;
 }
 
+/**
+ * Лог публикаций для раздела «Опубликовано»: группа, тема, время, обложка, ссылка.
+ * Фильтры — по группе и по исходу (уехало / сбой): в истории на сотни строк
+ * «покажи всё, что не уехало в эту группу» это первый вопрос.
+ */
+export async function listForLog({ limit = 50, groupId, only } = {}) {
+  const where = [];
+  const params = [];
+  if (groupId) {
+    params.push(groupId);
+    where.push(`p.group_id = $${params.length}`);
+  }
+  if (only === 'failed') where.push('p.error IS NOT NULL');
+  if (only === 'ok') where.push('p.error IS NULL AND p.pmp_publication_id IS NOT NULL');
+  if (only === 'live') where.push("p.mode = 'live' AND p.error IS NULL");
+  params.push(limit);
+
+  const { rows } = await query(
+    `SELECT p.*, g.name AS group_name, g.login AS group_login, g.external_id AS group_external_id,
+            po.title AS post_title, po.topic_key, po.image_url, po.status AS post_status,
+            a.topic_name, a.url AS article_url
+       FROM publications p
+       JOIN groups g ON g.id = p.group_id
+       JOIN posts po ON po.id = p.post_id
+       LEFT JOIN articles a ON a.id = po.article_id
+      ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+      ORDER BY COALESCE(p.post_at, p.created_at) DESC, p.id DESC
+      LIMIT $${params.length}`,
+    params,
+  );
+  return rows;
+}
+
+export async function findById(id) {
+  const { rows } = await query(
+    `SELECT p.*, g.pmp_account_id, g.name AS group_name
+       FROM publications p JOIN groups g ON g.id = p.group_id
+      WHERE p.id = $1`,
+    [id],
+  );
+  return rows[0] ?? null;
+}
+
+/** Адрес поста на стене — приходит от postmypost уже после реальной публикации. */
+export async function setVkUrl(id, url) {
+  await query('UPDATE publications SET vk_url = $2 WHERE id = $1', [id, url]);
+}
+
 export async function countAll() {
   const { rows } = await query(
     `SELECT count(*)::int AS total,

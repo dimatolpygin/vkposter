@@ -2,6 +2,7 @@ import * as runs from '../repo/runs.js';
 import * as settings from '../repo/settings.js';
 import { nextRunAt, isRunDue, scheduleText } from '../lib/schedule.js';
 import { startCycleInBackground, runningSince } from './run-cycle.js';
+import { captureError } from './capture-error.js';
 import { runWithContext, newRequestId } from '../context.js';
 import { log, errFields } from '../logger.js';
 
@@ -105,6 +106,7 @@ async function tick() {
   } catch (error) {
     lastFailureAt = Date.now();
     lastFailureReason = error.message;
+    await captureError('планировщик', error).catch(() => {});
     logger.error(errFields(error), `Тик планировщика упал: ${error.message}`);
   }
 }

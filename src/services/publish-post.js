@@ -5,6 +5,7 @@ import * as posts from '../repo/posts.js';
 import * as publications from '../repo/publications.js';
 import * as settings from '../repo/settings.js';
 import { config } from '../config.js';
+import { captureError } from './capture-error.js';
 import { getRequestId } from '../context.js';
 import { log, errFields } from '../logger.js';
 
@@ -180,6 +181,11 @@ export async function publishPost(post, { groupIds, mode, postAt, ignoreDailyLim
         mode: publishMode,
         requestId,
         pmpFileId: fileId,
+      });
+      await captureError('публикация', error, {
+        service: 'postmypost',
+        postId: post.id,
+        groupId: group.id,
       });
       failed.push({ group, error });
       logger.error(

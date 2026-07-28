@@ -17,7 +17,7 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_RETRIES = 3;
 
 export class HttpError extends Error {
-  constructor({ method, url, status, body, attempt }) {
+  constructor({ method, url, status, body, attempt, label }) {
     super(`${method} ${url} → HTTP ${status}`);
     this.name = 'HttpError';
     this.status = status;
@@ -25,6 +25,9 @@ export class HttpError extends Error {
     this.method = method;
     this.url = url;
     this.attempt = attempt;
+    // Имя провайдера из вызова (kie.ai / postmypost / …). Нужно журналу ошибок:
+    // по хосту сервис не определить, в dev там заглушка на localhost.
+    this.label = label;
   }
 }
 
@@ -120,7 +123,9 @@ export async function request(url, options = {}) {
             ? `${label}: ответил ${response.status}, будет повтор`
             : `${label}: ответил ${response.status} — без повтора`,
         );
-        const error = new HttpError({ method, url, status: response.status, body: text, attempt });
+        const error = new HttpError({
+          method, url, status: response.status, body: text, attempt, label,
+        });
         if (!retryable) throw error;
         lastError = error;
         const delay = retryDelayMs(response, attempt, baseDelayMs);

@@ -10,6 +10,7 @@ import * as posts from '../../repo/posts.js';
 import * as groups from '../../repo/groups.js';
 import * as publications from '../../repo/publications.js';
 import * as runs from '../../repo/runs.js';
+import * as appErrors from '../../repo/errors.js';
 import { checkSource } from '../../services/check-source.js';
 import { buildPlan } from '../../services/plan-run.js';
 import { startCycleInBackground, runningSince, lastBackgroundError } from '../../services/run-cycle.js';
@@ -27,13 +28,8 @@ import { log, errFields } from '../../logger.js';
 
 const logger = log('панель');
 
-/** Заглушка раздела, который наполняется на своём этапе. */
-function soon(stage, what) {
-  return `<div class="card">
-      <span class="tag soon">этап ${stage}</span>
-      <p style="margin:10px 0 0">${what}</p>
-    </div>`;
-}
+/** Виды прогонов — фильтры в разделе «Прогоны» и подписи в таблицах. */
+const KNOWN_RUN_KINDS = ['cron', 'manual', 'backfill', 'source_check', 'archive'];
 
 export function panelRouter() {
   const router = Router();
@@ -53,7 +49,9 @@ export function panelRouter() {
             WHERE topic_key IS NOT NULL AND status <> 'duplicate') AS topics,
           (SELECT count(*) FROM posts)                     AS posts,
           (SELECT count(*) FROM publications)              AS publications,
-          (SELECT count(*) FROM runs)                      AS runs
+          (SELECT count(*) FROM runs)                      AS runs,
+          (SELECT count(*) FROM app_errors
+            WHERE created_at > now() - interval '24 hours') AS errors_day
       `);
       const s = rows[0];
       const map = await settings.getMap();
@@ -74,6 +72,10 @@ export function panelRouter() {
           ${stat(s.posts, 'Постов сгенерировано')}
           ${stat(s.publications, 'Публикаций')}
           ${stat(s.runs, 'Прогонов')}
+          ${Number(s.errors_day) > 0
+            ? `<a href="/errors" style="text-decoration:none">${
+                stat(s.errors_day, 'Сбоев за сутки')}</a>`
+            : stat(0, 'Сбоев за сутки')}
         </div>
         <h2>Текущая конфигурация</h2>
         <div class="card">
@@ -1479,11 +1481,346 @@ export function panelRouter() {
       </div>`;
   }
 
-  // ── Разделы будущих этапов ───────────────────────────────────────────────
-  const stubs = [
-    ['/runs', 'Прогоны', 11, 'История запусков: найдено, сгенерировано, опубликовано, ошибки, request-id.'],
-    ['/published', 'Опубликовано', 11, 'Лог постов: группа, тема, время, ссылка на пост в ВК, обложка.'],
-  ];
+  // ── Прогоны ──────────────────────────────────────────────────────────────
+  /**
+   * История запусков. Сюда попадают все виды прогонов, включая проверки источников
+   * и наполнение из архива: для наблюдаемости важно «что система делала», а не
+   * «что из этого было постингом».
+   */
+  router.get('/runs', async (req, res, next) => {
+    try {
+      const kind = KNOWN_RUN_KINDS.includes(req.query.kind) ? req.query.kind : null;
+      const list = await runs.listRecent(60, { kind: kind ?? undefined });
+
+      const rows = list.length
+        ? list
+            .map(
+              (run) => `<tr>
+                <td><a href="/runs/${run.id}">#${run.id}</a><br>
+                    <span class="hint">${esc(runKindText(run.kind))}</span></td>
+                <td>${runStatusTag(run.status)}</td>
+                <td class="hint">${esc(formatDate(run.started_at))}<br>${
+                  run.finished_at
+                    ? `${esc(durationText(run.started_at, run.finished_at))}`
+                    : 'ещё идёт'}</td>
+                <td>${runCountersText(run)}</td>
+                <td>${run.errors
+                    ? `<a href="/errors?run=${run.id}"><span class="tag off">сбоев ${run.errors}</span></a>`
+                    : (run.error ? `<span class="tag off">сбой</span>` : '<span class="hint">нет</span>')}
+                    ${run.error ? `<br><span class="hint">${esc(cut(run.error, 120))}</span>` : ''}</td>
+                <td><code>${esc(run.request_id ?? '')}</code></td>
+              </tr>`,
+            )
+            .join('\n')
+        : '<tr><td colspan="6" class="empty">Прогонов ещё не было</td></tr>';
+
+      const filters = ['', ...KNOWN_RUN_KINDS]
+        .map((value) => {
+          const active = (kind ?? '') === value;
+          const title = value ? runKindText(value) : 'все';
+          return `<a href="/runs${value ? `?kind=${value}` : ''}"
+             class="tag ${active ? 'on' : 'off'}" style="text-decoration:none">${esc(title)}</a>`;
+        })
+        .join(' ');
+
+      const body = `<div class="card">
+          <p style="margin:0 0 10px">Вид: ${filters}</p>
+          <table>
+            <thead><tr><th>Прогон</th><th>Итог</th><th>Начат</th>
+              <th>Счётчики</th><th>Ошибки</th><th>request-id</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+          <p class="hint" style="margin:12px 0 0">
+            Счётчики — по шагам конвейера: слотов в плане, из них сгенерировано текстов
+            и опубликовано. У проверки источника «найдено» - это новые материалы.
+            По <code>request-id</code> ищутся все строки лога прогона:
+            <code>docker compose logs app | grep &lt;id&gt;</code>.
+          </p>
+        </div>`;
+
+      res.type('html').send(
+        page({
+          title: 'Прогоны',
+          active: '/runs',
+          user: req.user,
+          heading: 'Прогоны',
+          sub: 'Что система делала: запуски, счётчики по шагам, сбои и сквозной request-id.',
+          message: buildSourceMessage(req.query),
+          body,
+        }),
+      );
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  /** Карточка одного прогона: слоты, ошибки, meta — то же, что видно на «Обзоре». */
+  router.get('/runs/:id', async (req, res, next) => {
+    try {
+      const id = Number.parseInt(req.params.id, 10);
+      const run = await runs.findById(id);
+      if (!run) return next();
+
+      const errorList = await appErrors.listByRun(id);
+      const meta = run.meta && Object.keys(run.meta).length
+        ? Object.entries(run.meta)
+            .filter(([, value]) => value !== null && value !== undefined)
+            .map(([key, value]) => `${esc(key)}: ${esc(String(value))}`)
+            .join(' · ')
+        : '';
+
+      const body = `<div class="card">
+          <table>
+            <tr><th>Прогон</th><td>#${run.id} ${esc(runKindText(run.kind))},
+              ${runStatusTag(run.status)}</td></tr>
+            <tr><th>Время</th><td>${esc(formatDate(run.started_at))} →
+              ${esc(formatDate(run.finished_at) || 'ещё идёт')}${
+                run.finished_at ? ` <span class="hint">(${esc(durationText(run.started_at, run.finished_at))})</span>` : ''
+              }</td></tr>
+            <tr><th>Счётчики</th><td>${runCountersText(run)}</td></tr>
+            ${meta ? `<tr><th>Подробности</th><td class="hint">${meta}</td></tr>` : ''}
+            ${run.error ? `<tr><th>Ошибка</th><td class="hint">${esc(run.error)}</td></tr>` : ''}
+            <tr><th>request-id</th><td><code>${esc(run.request_id ?? '')}</code>
+              <span class="hint">поиск в логах:
+                <code>docker compose logs app | grep ${esc(run.request_id ?? '')}</code></span></td></tr>
+          </table>
+          ${await runItemsTable(run.id)}
+        </div>
+        ${errorList.length ? `<h2>Сбои прогона</h2>${errorsTable(errorList)}` : ''}
+        <p><a href="/runs">← ко всем прогонам</a></p>`;
+
+      res.type('html').send(
+        page({
+          title: `Прогон #${run.id}`,
+          active: '/runs',
+          user: req.user,
+          heading: `Прогон #${run.id}`,
+          sub: esc(runKindText(run.kind)),
+          body,
+        }),
+      );
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  // ── Опубликовано ─────────────────────────────────────────────────────────
+  router.get('/published', async (req, res, next) => {
+    try {
+      const groupId = Number.parseInt(req.query.group, 10);
+      const only = ['ok', 'failed', 'live'].includes(req.query.only) ? req.query.only : null;
+      const list = await publications.listForLog({
+        limit: 80,
+        groupId: Number.isNaN(groupId) ? undefined : groupId,
+        only: only ?? undefined,
+      });
+      const groupList = await groups.listAll();
+      const totals = await publications.countAll();
+
+      const rows = list.length
+        ? list
+            .map(
+              (item) => `<tr>
+                <td style="width:110px">${item.image_url
+                    ? `<a href="/posts/${item.post_id}"><img src="${esc(item.image_url)}" alt=""
+                         style="width:96px;border-radius:4px;display:block"></a>`
+                    : '<span class="hint">нет обложки</span>'}</td>
+                <td><a href="/posts/${item.post_id}">${esc(item.post_title ?? `пост #${item.post_id}`)}</a><br>
+                    <span class="hint">${esc(item.topic_name ?? item.topic_key ?? '')}</span></td>
+                <td>${esc(item.group_name)}<br>${vkLinkCell(item)}</td>
+                <td class="hint">${esc(formatDate(item.post_at ?? item.created_at))}</td>
+                <td>${item.error
+                    ? `<span class="tag off">не уехал</span><br><span class="hint">${esc(cut(item.error, 160))}</span>`
+                    : `${publishModeTag(item.mode)}<br><span class="hint">id ${
+                        esc(item.pmp_publication_id ?? '—')}, статус ${esc(item.pmp_status ?? '—')}</span>`}</td>
+                <td><code>${esc(item.request_id ?? '')}</code></td>
+              </tr>`,
+            )
+            .join('\n')
+        : '<tr><td colspan="6" class="empty">Публикаций пока нет</td></tr>';
+
+      const groupFilter = groupList
+        .map(
+          (group) => `<a href="/published?group=${group.id}" class="tag ${
+            group.id === groupId ? 'on' : 'off'}" style="text-decoration:none">${esc(group.name)}</a>`,
+        )
+        .join(' ');
+
+      const body = `<div class="grid">
+          ${stat(totals.total, 'Всего публикаций')}
+          ${stat(totals.live, 'На стену (live)')}
+          ${stat(totals.failed, 'Со сбоем')}
+        </div>
+        <div class="card">
+          <p style="margin:0 0 10px">
+            <a href="/published" class="tag ${!only && Number.isNaN(groupId) ? 'on' : 'off'}"
+               style="text-decoration:none">все</a>
+            <a href="/published?only=ok" class="tag ${only === 'ok' ? 'on' : 'off'}"
+               style="text-decoration:none">уехавшие</a>
+            <a href="/published?only=live" class="tag ${only === 'live' ? 'on' : 'off'}"
+               style="text-decoration:none">на стену</a>
+            <a href="/published?only=failed" class="tag ${only === 'failed' ? 'on' : 'off'}"
+               style="text-decoration:none">со сбоем</a>
+            ${groupFilter ? ` · ${groupFilter}` : ''}
+          </p>
+          <table>
+            <thead><tr><th>Обложка</th><th>Пост</th><th>Куда</th><th>Время</th>
+              <th>Итог</th><th>request-id</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+          <p class="hint" style="margin:12px 0 0">
+            Ссылка на запись в ВК появляется только у реальной публикации: у черновика
+            записи на стене ещё нет, поэтому ссылка ведёт на саму группу. Кнопка
+            «Найти ссылку» перечитывает публикацию в postmypost - ей есть смысл
+            пользоваться после того, как отложенный пост вышел.
+          </p>
+        </div>`;
+
+      res.type('html').send(
+        page({
+          title: 'Опубликовано',
+          active: '/published',
+          user: req.user,
+          heading: 'Опубликовано',
+          sub: 'Лог постов: куда, когда, чем закончилось и по какому request-id искать в логах.',
+          message: buildSourceMessage(req.query),
+          body,
+        }),
+      );
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  /**
+   * Подтянуть ссылку на запись в ВК из postmypost. Отдельной кнопкой, а не при
+   * публикации: в момент создания записи на стене ещё нет — ни у черновика,
+   * ни у отложенного поста.
+   */
+  router.post('/publications/:id/vk-link', async (req, res) => {
+    const back = String(req.body.back ?? '/published');
+    try {
+      const id = Number.parseInt(req.params.id, 10);
+      const row = await publications.findById(id);
+      if (!row) throw new Error(`Публикация #${id} не найдена`);
+      if (!row.pmp_publication_id) throw new Error('У этой записи нет id в postmypost');
+
+      const payload = await pmp.publication(row.pmp_publication_id);
+      const url = pmp.vkUrlFrom(payload);
+      if (!url) {
+        throw new Error(
+          'postmypost не отдал адрес записи в ВК. Так бывает у черновика и у отложенного ' +
+            'поста, который ещё не вышел: записи на стене пока не существует.',
+        );
+      }
+      await publications.setVkUrl(id, url);
+      res.redirect(`${back}?ok=${encodeURIComponent(`Ссылка найдена: ${url}`)}`);
+    } catch (error) {
+      logger.error(errFields(error), 'Поиск ссылки на пост в ВК не удался');
+      res.redirect(`${back}?err=${encodeURIComponent(error.message)}`);
+    }
+  });
+
+  // ── Ошибки ───────────────────────────────────────────────────────────────
+  router.get('/errors', async (req, res, next) => {
+    try {
+      const runId = Number.parseInt(req.query.run, 10);
+      const list = Number.isNaN(runId)
+        ? await appErrors.listRecent({
+            limit: 100,
+            stage: req.query.stage || undefined,
+            service: req.query.service || undefined,
+          })
+        : await appErrors.listByRun(runId, 100);
+      const stats = await appErrors.summary();
+
+      const filters = stats.byStage
+        .map((row) => {
+          const params = new URLSearchParams({ stage: row.stage });
+          if (row.service) params.set('service', row.service);
+          const active = req.query.stage === row.stage
+            && (req.query.service ?? '') === (row.service ?? '');
+          return `<a href="/errors?${params}" class="tag ${active ? 'on' : 'off'}"
+              style="text-decoration:none">${esc(row.stage)}${
+                row.service ? ` · ${esc(row.service)}` : ''} (${row.n})</a>`;
+        })
+        .join(' ');
+
+      const body = `<div class="card">
+          <p style="margin:0 0 10px">
+            <a href="/errors" class="tag ${req.query.stage || !Number.isNaN(runId) ? 'off' : 'on'}"
+               style="text-decoration:none">все</a>
+            ${filters}
+            ${Number.isNaN(runId) ? '' : `<span class="tag on">прогон #${runId}</span>`}
+          </p>
+          ${errorsTable(list)}
+          <form method="post" action="/errors/clear" style="margin-top:14px">
+            <button class="ghost" type="submit">Очистить журнал</button>
+            <span class="hint" style="margin-left:8px">всего записей: ${stats.total},
+              за сутки: ${stats.recent}</span>
+          </form>
+          <p class="hint" style="margin:12px 0 0">
+            «Шаг» - место в конвейере, «сервис» - чей ответ привёл к сбою, «ответ» -
+            тело ответа провайдера как есть (в нём и объяснение 422, и 401).
+            По <code>request-id</code> находятся все строки этого же события в логах:
+            <code>docker compose logs app | grep &lt;id&gt;</code>.
+          </p>
+        </div>`;
+
+      res.type('html').send(
+        page({
+          title: 'Ошибки',
+          active: '/errors',
+          user: req.user,
+          heading: 'Ошибки',
+          sub: 'Последние сбои с шагом конвейера, внешним сервисом и телом ответа.',
+          message: buildSourceMessage(req.query),
+          body,
+        }),
+      );
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.post('/errors/clear', async (req, res) => {
+    try {
+      const removed = await appErrors.clear();
+      logger.info({ кто: req.user.login, удалено: removed }, `Журнал ошибок очищен: ${removed} записей`);
+      res.redirect(`/errors?ok=${encodeURIComponent(`Журнал очищен: удалено ${removed} записей`)}`);
+    } catch (error) {
+      res.redirect(`/errors?err=${encodeURIComponent(error.message)}`);
+    }
+  });
+
+  /** Таблица сбоев — общая для раздела «Ошибки» и карточки прогона. */
+  function errorsTable(list) {
+    if (list.length === 0) return '<p class="empty">Сбоев не записано.</p>';
+    const rows = list
+      .map(
+        (item) => `<tr>
+          <td class="hint">${esc(formatDate(item.created_at))}</td>
+          <td>${esc(item.stage)}${
+            item.service ? `<br><span class="hint">${esc(item.service)}</span>` : ''}</td>
+          <td>${esc(item.message)}${
+            item.http_status ? `<br><span class="tag off">HTTP ${esc(item.http_status)}</span>` : ''}${
+            item.url ? `<br><span class="hint">${esc(cut(item.url, 90))}</span>` : ''}</td>
+          <td>${item.details
+              ? `<details><summary class="hint">ответ сервиса</summary>
+                   <pre style="white-space:pre-wrap;font-size:12px;margin:6px 0 0">${
+                     esc(cut(item.details, 1500))}</pre></details>`
+              : '<span class="hint">—</span>'}</td>
+          <td class="hint">${errorContext(item)}</td>
+          <td><code>${esc(item.request_id ?? '')}</code></td>
+        </tr>`,
+      )
+      .join('\n');
+    return `<table>
+        <thead><tr><th>Когда</th><th>Шаг</th><th>Что случилось</th><th>Ответ</th>
+          <th>Контекст</th><th>request-id</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+  }
 
   /** Что уже уехало (или не уехало) по этому посту. */
   async function publicationsTable(postId) {
@@ -1786,21 +2123,6 @@ export function panelRouter() {
     </div>`;
   }
 
-  for (const [href, title, stage, what] of stubs) {
-    router.get(href, (req, res) => {
-      res.type('html').send(
-        page({
-          title,
-          active: href,
-          user: req.user,
-          heading: title,
-          sub: 'Раздел появится на своём этапе.',
-          body: soon(stage, what),
-        }),
-      );
-    });
-  }
-
   return router;
 }
 
@@ -1968,6 +2290,74 @@ function buildSourceMessage(q) {
 function formatDate(value) {
   if (!value) return '';
   return new Date(value).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' });
+}
+
+/** Сколько шёл прогон. Секунды до минуты, дальше минуты — точнее в панели не нужно. */
+function durationText(from, to) {
+  if (!from || !to) return '';
+  const seconds = Math.max(0, Math.round((new Date(to) - new Date(from)) / 1000));
+  if (seconds < 60) return `${seconds} c`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} мин ${seconds % 60} c`;
+  return `${Math.floor(minutes / 60)} ч ${minutes % 60} мин`;
+}
+
+function cut(text, limit) {
+  const value = String(text ?? '');
+  return value.length > limit ? `${value.slice(0, limit)}…` : value;
+}
+
+/**
+ * Счётчики прогона по шагам конвейера. У проверки источника смысл колонок другой:
+ * «найдено» там — новые материалы, а генерации и публикации не бывает вовсе.
+ */
+function runCountersText(run) {
+  if (run.kind === 'source_check') {
+    const meta = run.meta ?? {};
+    return `новых материалов ${run.found}` +
+      (meta.discovered ? ` <span class="hint">из ${esc(meta.discovered)} найденных</span>` : '') +
+      (meta.extracted ? `, текстов ${esc(meta.extracted)}` : '');
+  }
+  return `слотов ${run.items ?? run.found}, текстов ${run.generated}, опубликовано ${run.published}` +
+    (run.items_failed ? ` <span class="tag off">сбоев ${run.items_failed}</span>` : '');
+}
+
+/** С чем связан сбой: пост, группа, материал, источник — что известно, то и показываем. */
+function errorContext(item) {
+  const parts = [];
+  if (item.run_id) parts.push(`<a href="/runs/${item.run_id}">прогон #${item.run_id}</a>`);
+  if (item.post_id) parts.push(`<a href="/posts/${item.post_id}">пост #${item.post_id}</a>`);
+  if (item.group_name) parts.push(esc(item.group_name));
+  if (item.source_name) parts.push(esc(item.source_name));
+  if (item.topic_name) parts.push(esc(item.topic_name));
+  return parts.join(' · ') || '—';
+}
+
+/**
+ * Ссылка «куда уехал пост». У реальной публикации это запись на стене (адрес
+ * приходит из postmypost кнопкой), у черновика записи ещё нет — ведём на группу,
+ * чтобы ссылка в логе всегда была рабочей, а не мёртвой.
+ */
+function vkLinkCell(item) {
+  if (item.vk_url) {
+    return `<a href="${esc(item.vk_url)}" target="_blank" rel="noopener">пост в ВК ↗</a>`;
+  }
+  const wall = groupWallUrl(item);
+  const refresh = item.pmp_publication_id
+    ? `<form class="inline" method="post" action="/publications/${item.id}/vk-link">
+         <input type="hidden" name="back" value="/published">
+         <button class="ghost small" type="submit">Найти ссылку</button>
+       </form>`
+    : '';
+  return `${wall ? `<a href="${esc(wall)}" target="_blank" rel="noopener">группа ↗</a> ` : ''}${refresh}`;
+}
+
+/** Адрес группы ВК: по короткому имени, а если его нет — по числовому id сообщества. */
+function groupWallUrl(item) {
+  if (item.group_login) return `https://vk.com/${item.group_login}`;
+  const external = String(item.group_external_id ?? '').trim();
+  if (/^-?\d+$/.test(external)) return `https://vk.com/club${external.replace('-', '')}`;
+  return null;
 }
 
 /** Только дата: у периода наполнения времени нет, и «00:00:00» в нём выглядит мусором. */

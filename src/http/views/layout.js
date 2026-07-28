@@ -24,6 +24,7 @@ const NAV = [
   { href: '/archive', title: 'Из архива' },
   { href: '/runs', title: 'Прогоны' },
   { href: '/published', title: 'Опубликовано' },
+  { href: '/errors', title: 'Ошибки' },
 ];
 
 const STYLES = `

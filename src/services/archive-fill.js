@@ -9,6 +9,7 @@ import { checkSource } from './check-source.js';
 import { generatePost } from './generate-post.js';
 import { generateImageForPost } from './generate-image.js';
 import { publishPost, usingLocalPmpStub } from './publish-post.js';
+import { captureError } from './capture-error.js';
 import { publicBaseReachable } from '../lib/media.js';
 import { runWithContext, newRequestId, getRequestId } from '../context.js';
 import { log, errFields } from '../logger.js';
@@ -153,6 +154,7 @@ function launch(jobId) {
   )
     .catch((error) => {
       logger.error(errFields(error), `Задание наполнения #${jobId} упало: ${error.message}`);
+      if (!error.captured) captureError('наполнение из архива', error).catch(() => {});
       return archive
         .finish(jobId, { status: 'failed', error: error.message, stage: 'сбой' })
         .catch(() => {});
@@ -415,6 +417,14 @@ async function publishQueue(job) {
       await runs.setItemStatus(item.id, 'failed', error.message);
       failed += 1;
       await archive.bump(job.id, { failed: 1 });
+      if (!error.captured) {
+        await captureError('слот наполнения', error, {
+          runId: Number(job.run_id),
+          groupId: Number(item.group_id),
+          postId: item.post_id ? Number(item.post_id) : null,
+          articleId: item.article_id ? Number(item.article_id) : null,
+        });
+      }
       logger.error(
         { задание: job.id, слот: item.slot_no, группа: item.group_name, ...errFields(error) },
         `Наполнение #${job.id}, слот ${item.slot_no} («${item.group_name}») не отработал: ${error.message}`,

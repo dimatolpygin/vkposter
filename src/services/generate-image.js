@@ -3,6 +3,7 @@ import { savePostImage } from '../lib/media.js';
 import * as prompts from '../repo/prompts.js';
 import * as posts from '../repo/posts.js';
 import * as settings from '../repo/settings.js';
+import { captureError } from './capture-error.js';
 import { log, errFields } from '../logger.js';
 
 const logger = log('обложка');
@@ -112,6 +113,7 @@ export async function generateImageForPost(post) {
     // Провалившуюся задачу забываем: дочитывать нечего, а её id заблокировал бы
     // все следующие попытки. Таймаут — другое дело, там id остаётся.
     await posts.setImageError(post.id, error.message, { clearTask: error.taskDead === true });
+    await captureError('генерация обложки', error, { service: 'kie.ai', postId: post.id });
     logger.error(
       { пост: post.id, тема: topic, ...errFields(error) },
       `Обложка поста #${post.id} не сделана: ${error.message}`,

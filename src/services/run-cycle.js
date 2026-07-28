@@ -7,7 +7,8 @@ import { backfillArticles } from './backfill.js';
 import { generatePost } from './generate-post.js';
 import { generateImageForPost } from './generate-image.js';
 import { publishPost, usingLocalPmpStub } from './publish-post.js';
-import { getRequestId } from '../context.js';
+import { captureError } from './capture-error.js';
+import { getRequestId, extendContext } from '../context.js';
 import { log, errFields } from '../logger.js';
 
 const logger = log('прогон');
@@ -91,6 +92,10 @@ export function startCycleInBackground(options = {}) {
       // Прогон в фоне: ошибку некому вернуть в ответе, поэтому она оседает здесь
       // и показывается в карточке прогона до следующего запуска.
       lastError = error.message;
+      // Прогон в фоне: ответа с ошибкой нет, поэтому кроме карточки на «Обзоре»
+      // сбой должен остаться в журнале — иначе после следующего запуска о нём
+      // не останется следа нигде, кроме логов контейнера.
+      if (!error.captured) captureError('прогон', error).catch(() => {});
       logger.error(errFields(error), `Фоновый прогон упал: ${error.message}`);
       return null;
     })
@@ -175,6 +180,10 @@ async function executeCycle({ kind, groupIds, limitPerGroup, stepMinutes }) {
     );
   }
 
+  // Номер прогона — в сквозной контекст: он попадёт и в каждую строку лога (поле `run`),
+  // и в записи журнала ошибок, сделанные глубже по конвейеру, без ручной передачи.
+  extendContext({ runId: run.id });
+
   const items = (await runs.listItems(run.id)).filter((item) =>
     ['planned', 'generated'].includes(item.status),
   );
@@ -184,10 +193,14 @@ async function executeCycle({ kind, groupIds, limitPerGroup, stepMinutes }) {
   const failures = [];
 
   for (const item of items) {
+    // Шаг конвейера, на котором слот находится прямо сейчас. Нужен журналу ошибок:
+    // «слот 3 упал» не говорит ничего, «слот 3 упал на обложке» — говорит всё.
+    let step = 'подготовка слота';
     try {
       let post = item.post_id ? await posts.findById(Number(item.post_id)) : null;
 
       if (!post) {
+        step = 'генерация текста';
         const article = await posts.findArticleForGeneration(Number(item.article_id));
         if (!article) throw new Error(`Материал #${item.article_id} исчез из базы`);
         post = await generatePost(article);
@@ -196,8 +209,10 @@ async function executeCycle({ kind, groupIds, limitPerGroup, stepMinutes }) {
       }
 
       if (!post.image_url) {
+        step = 'генерация обложки';
         post = await generateImageForPost(post);
       }
+      step = 'публикация';
 
       // postAt берётся из плана, а не «сейчас + N минут»: именно план разносит публикации
       // по слотам, и продолжение прерванного прогона должно попадать в свои же времена.
@@ -209,6 +224,16 @@ async function executeCycle({ kind, groupIds, limitPerGroup, stepMinutes }) {
       published += 1;
     } catch (error) {
       await runs.setItemStatus(item.id, 'failed', error.message);
+      // `captured` ставит тот, кто поймал сбой ближе к месту — в нём и сервис, и тело
+      // ответа, и группа. Второй записи об одном и том же в журнале быть не должно.
+      if (!error.captured) {
+        await captureError(step, error, {
+          runId: run.id,
+          groupId: Number(item.group_id),
+          postId: item.post_id ? Number(item.post_id) : null,
+          articleId: item.article_id ? Number(item.article_id) : null,
+        });
+      }
       failures.push({ slot: item.slot_no, group: item.group_name, error });
       logger.error(
         { прогон: run.id, слот: item.slot_no, группа: item.group_name, ...errFields(error) },

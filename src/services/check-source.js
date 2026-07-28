@@ -5,6 +5,7 @@ import * as articles from '../repo/articles.js';
 import * as runs from '../repo/runs.js';
 import * as settings from '../repo/settings.js';
 import { query } from '../db/pool.js';
+import { captureError } from './capture-error.js';
 import { log, errFields } from '../logger.js';
 import { getRequestId, extendContext } from '../context.js';
 
@@ -158,6 +159,11 @@ export async function checkSource(source, {
         } catch (error) {
           stats.extractFailed += 1;
           await articles.markFailed(article.id, error.message);
+          await captureError('извлечение текста', error, {
+            sourceId: source.id,
+            articleId: article.id,
+            url: article.url,
+          });
           logger.error({ url: article.url, ...errFields(error) }, 'Извлечение текста упало');
         }
       }
@@ -179,6 +185,7 @@ export async function checkSource(source, {
     });
   } catch (error) {
     await runs.finishRun(runId, { status: 'failed', error: error.message, meta: stats });
+    await captureError('проверка источника', error, { sourceId: source.id, runId });
     logger.error({ источник: source.code, ...errFields(error) }, `Проверка источника ${source.code} упала`);
     throw error;
   }

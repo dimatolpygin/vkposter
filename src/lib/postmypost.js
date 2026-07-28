@@ -233,6 +233,31 @@ export async function createPublication({
 }
 
 /**
+ * Публикация целиком, как её видит postmypost. Нужна разделу «Опубликовано»:
+ * ссылки на пост в ВК в ответе на создание нет и быть не может (в момент создания
+ * записи на стене ещё не существует), а после реальной публикации адрес где-то
+ * в объекте появляется.
+ */
+export async function publication(publicationId) {
+  return first(
+    await call('GET', `/publications/${publicationId}?project_id=${projectId()}`),
+  );
+}
+
+/**
+ * Найти в ответе адрес поста ВКонтакте. Имя поля в справочнике не описано и у разных
+ * соцсетей разное, поэтому ищем по самому адресу — он опознаётся однозначно
+ * (`vk.com/wall-123_456`), а промахнуться мимо неизвестного поля так нельзя.
+ */
+export function vkUrlFrom(payload) {
+  if (!payload) return null;
+  const text = typeof payload === 'string' ? payload : JSON.stringify(payload);
+  const match = text.match(/https?:\\?\/\\?\/(?:m\.)?vk\.com\/wall-?\d+_\d+/i);
+  if (!match) return null;
+  return match[0].replaceAll('\\/', '/');
+}
+
+/**
  * Удаление/отмена публикации, в том числе черновика.
  *
  * Известный баг postmypost: в ответ прилетает `422 Response validation error … publication_status`,

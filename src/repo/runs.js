@@ -18,12 +18,36 @@ export async function finishRun(id, { status, found = 0, generated = 0, publishe
   );
 }
 
-export async function listRecent(limit = 30) {
+/**
+ * История прогонов для раздела «Прогоны». Счётчики слотов и сбоев считаются здесь,
+ * а не в панели: иначе на каждый прогон в списке уходил бы отдельный запрос.
+ */
+export async function listRecent(limit = 30, { kind } = {}) {
+  const params = [];
+  let where = '';
+  if (kind) {
+    params.push(kind);
+    where = `WHERE kind = $${params.length}`;
+  }
+  params.push(limit);
   const { rows } = await query(
-    `SELECT * FROM runs ORDER BY started_at DESC LIMIT $1`,
-    [limit],
+    `SELECT r.*,
+            (SELECT count(*) FROM run_items i WHERE i.run_id = r.id)::int AS items,
+            (SELECT count(*) FROM run_items i
+              WHERE i.run_id = r.id AND i.status = 'failed')::int AS items_failed,
+            (SELECT count(*) FROM app_errors e WHERE e.run_id = r.id)::int AS errors
+       FROM runs r
+       ${where}
+      ORDER BY r.started_at DESC
+      LIMIT $${params.length}`,
+    params,
   );
   return rows;
+}
+
+export async function findById(id) {
+  const { rows } = await query('SELECT * FROM runs WHERE id = $1', [id]);
+  return rows[0] ?? null;
 }
 
 export async function lastRun() {
