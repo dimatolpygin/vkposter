@@ -5,6 +5,7 @@ import { config } from '../config.js';
 import { log } from '../logger.js';
 import * as users from '../repo/users.js';
 import * as settings from '../repo/settings.js';
+import * as prompts from '../repo/prompts.js';
 
 const logger = log('сид');
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -44,9 +45,30 @@ async function seedPrompts() {
         value = '';
       }
     }
-    const inserted = await settings.setIfAbsent(seed.key, value, seed.title);
-    if (inserted) {
-      logger.info({ ключ: seed.key, символов: value.length }, `Промт засеян: ${seed.key}`);
+    // Зеркало в settings — наследие этапа 1, часть кода читает промт оттуда.
+    await settings.setIfAbsent(seed.key, value, seed.title);
+
+    // Рабочая копия живёт в версионной таблице prompts — её читает генерация и
+    // показывает раздел «Промты».
+    //
+    // Раньше сид заполнял только settings, а версии заводила миграция 0006,
+    // переносом из settings. На базе, которая существовала до этой миграции,
+    // всё сложилось; на ЧИСТОЙ базе — нет: миграции применяются раньше сидов,
+    // на момент 0006 settings ещё пуст, и переносить нечего. Первое же
+    // развёртывание с нуля (прод, этап 12) дало пустой раздел «Промты» и
+    // гарантированный отказ генерации «В БД нет активного промта post_prompt».
+    // Поэтому сид сам заводит первую версию, если ни одной ещё нет.
+    if (!value) continue;
+    const existing = await prompts.listVersions(seed.key, 1);
+    if (existing.length === 0) {
+      const version = await prompts.saveVersion(seed.key, value, {
+        note: 'первичное значение из репозитория',
+        createdBy: 'сид',
+      });
+      logger.info(
+        { ключ: seed.key, версия: version, символов: value.length },
+        `Промт засеян: ${seed.key}`,
+      );
     }
   }
 }
