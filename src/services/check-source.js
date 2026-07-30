@@ -14,6 +14,11 @@ const logger = log('проверка');
 /** Блокировка на источник: параллельные проверки одного сайта не должны пересекаться. */
 const LOCK_NAMESPACE = 771;
 
+/** Пауза между запросами текстов одного сайта. */
+const EXTRACT_PAUSE_MS = 600;
+
+const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
+
 async function withSourceLock(sourceId, fn) {
   const { rows } = await query('SELECT pg_try_advisory_lock($1, $2) AS locked', [
     LOCK_NAMESPACE,
@@ -142,7 +147,11 @@ export async function checkSource(source, {
       // Извлечение текста — только для новых материалов. Уже извлечённые в выборку
       // не попадают, поэтому повторная проверка не расходует лимит заново.
       const pending = await articles.listPendingExtraction(source.id, extractLimit);
-      for (const article of pending) {
+      for (const [index, article] of pending.entries()) {
+        // Пауза между статьями. Тридцать запросов за десять секунд по одному хосту
+        // выглядят как перебор: на проде vklader после такого залпа закрыл доступ
+        // с адреса сервера по 403. Скорость здесь не важна, прогон фоновый.
+        if (index > 0) await sleep(EXTRACT_PAUSE_MS);
         try {
           const extracted = await extractOne(source, article);
           if (extracted.via === 'firecrawl') stats.firecrawlCalls += 1;

@@ -7,6 +7,11 @@ const logger = log('sitemap');
 /** Потолок на число дочерних карт за одну проверку: у крупных сайтов их бывают десятки. */
 const MAX_CHILD_MAPS = 40;
 
+/** Пауза между запросами карт одного сайта. */
+const REQUEST_PAUSE_MS = 800;
+
+const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
+
 /**
  * Чтение sitemap. Основной способ обнаружения новых материалов — карта сайта,
  * а не краулинг: она отдаёт готовый список URL с датой изменения.
@@ -108,10 +113,23 @@ export async function discoverViaSitemap(source, { since, until = null, limit })
     );
   }
 
+  // При одинаковых lastmod карты читаются с конца: у генераторов WordPress нумерация
+  // идёт от старых к новым, свежее лежит в последнем файле. Это не догадка на пустом
+  // месте, а замер: у vklader в post-sitemap.xml архив с 2015 года, в post-sitemap15.xml —
+  // сегодняшний день. Чтение всех пятнадцати карт подряд работало, но сайт закрыл
+  // доступ по IP на 403: пятнадцать запросов карт плюс тридцать за текстами он счёл
+  // атакой. С конца хватает одной-двух карт.
+  const queue = orderedByDate ? children : [...children].reverse();
+
   const found = [];
-  for (const child of children.slice(0, MAX_CHILD_MAPS)) {
-    // Ранний выход экономит запросы, но допустим только там, где порядок карт осмысленный.
-    if (orderedByDate && found.length >= limit) break;
+  let emptyInRow = 0;
+  for (const [index, child] of queue.slice(0, MAX_CHILD_MAPS).entries()) {
+    if (found.length >= limit) break;
+    // Две пустые карты подряд означают, что свежее кончилось: дальше только архив.
+    // Две, а не одна: у сайта может быть служебная карта без свежих записей посередине.
+    if (emptyInRow >= 2) break;
+    // Пауза между запросами: обход карт — это залп по одному хосту, а мы у него в гостях.
+    if (index > 0) await sleep(REQUEST_PAUSE_MS);
     const xml = parsedIndex.isIndex ? await fetchXml(child.loc, label) : indexXml;
     const { entries } = parseSitemap(xml);
     // Верхняя граница применяется только к самим материалам, но не к выбору дочерних
@@ -124,6 +142,7 @@ export async function discoverViaSitemap(source, { since, until = null, limit })
       { карта: child.loc, всего: entries.length, свежих: fresh.length },
       `${child.loc}: ${fresh.length} свежих из ${entries.length}`,
     );
+    emptyInRow = fresh.length === 0 ? emptyInRow + 1 : 0;
     found.push(...fresh);
   }
 
