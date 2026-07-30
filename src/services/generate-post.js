@@ -72,12 +72,15 @@ function buildUserMessage(article, { researched = false, maxChars = 2200 } = {})
 
   // Лимит длины есть и в промте клиента, но в самом его конце, среди прочих правил,
   // и модель о нём забывает: живой прогон дал подряд 2534, 2918 и 3426 символов.
-  // Повтор рядом с задачей стоит одну строку и экономит переделки.
-  lines.push(
-    '',
-    `Длина поста строго до ${maxChars} символов вместе с рекламным блоком, ` +
-      `целься в ${targetChars(maxChars)}. Это жёсткое требование площадки.`,
-  );
+  // Повтор рядом с задачей стоит одну строку и экономит переделки. При нулевом
+  // потолке (ограничение снято) не напоминаем ничего: пусть пишет сколько напишет.
+  if (maxChars > 0) {
+    lines.push(
+      '',
+      `Длина поста строго до ${maxChars} символов вместе с рекламным блоком, ` +
+        `целься в ${targetChars(maxChars)}. Это жёсткое требование площадки.`,
+    );
+  }
 
   return lines.join('\n');
 }
@@ -93,8 +96,8 @@ function fixInstruction(problems, { minChars, maxChars, length }) {
     'Предыдущий вариант не прошёл проверку. Исправь ровно это и верни пост заново:\n— ' +
       problems.join('\n— '),
   ];
-  const tooLong = length > maxChars;
-  const tooShort = length < minChars;
+  const tooLong = maxChars > 0 && length > maxChars;
+  const tooShort = minChars > 0 && length < minChars;
   if (tooLong) {
     lines.push(
       `Сократи текст на ${length - targetChars(maxChars)} символов и уложись в ${targetChars(maxChars)}. ` +

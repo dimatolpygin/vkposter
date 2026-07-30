@@ -95,7 +95,7 @@ export function panelRouter() {
             <tr><th>Окно публикаций</th><td>${esc(map.posting_window_start)}-${
               esc(map.posting_window_end)} МСК, разброс до ${esc(map.slot_jitter_minutes)} мин</td></tr>
             <tr><th>Режим публикации</th><td>${publishModeTag(map.publish_mode)}</td></tr>
-            <tr><th>Длина поста</th><td>${esc(map.post_min_chars)}-${esc(map.post_max_chars)} символов</td></tr>
+            <tr><th>Длина поста</th><td>${esc(postLengthLabel(map))}</td></tr>
           </table>
         </div>
         <h2>Прогон</h2>
@@ -370,6 +370,27 @@ export function panelRouter() {
           </form>
         </div>
         <div class="card">
+          <h2 style="margin-top:0">Длина поста</h2>
+          <p class="hint" style="margin:0 0 12px">
+            Границы, по которым пост принимается или отправляется на переделку.
+            Ноль означает «без ограничения»: сколько написала нейросеть, столько и уйдёт
+            в группу. В записи ВК помещается около 16 тысяч символов, так что упереться
+            в площадку обзором нельзя; в ленте пост всё равно сворачивается кнопкой
+            «Показать полностью» примерно на 350 символах.
+          </p>
+          <form method="post" action="/settings/post-length">
+            <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end">
+              <label>минимум, символов<br>
+                <input type="number" name="post_min_chars" min="0" max="20000"
+                       value="${esc(map.post_min_chars)}" style="width:110px"></label>
+              <label>максимум, символов<br>
+                <input type="number" name="post_max_chars" min="0" max="20000"
+                       value="${esc(map.post_max_chars)}" style="width:110px"></label>
+              <button type="submit">Сохранить</button>
+            </div>
+          </form>
+        </div>
+        <div class="card">
           <h2 style="margin-top:0">Обновление источников</h2>
           <p class="hint" style="margin:0 0 12px">
             Перед каждым прогоном система обходит все включённые сайты и забирает то,
@@ -625,6 +646,25 @@ export function panelRouter() {
       );
     } catch (error) {
       logger.error(errFields(error), 'Сохранение настроек добора упало');
+      res.redirect(`/settings?err=${encodeURIComponent(error.message)}`);
+    }
+  });
+
+  router.post('/settings/post-length', async (req, res) => {
+    try {
+      const min = requireInt(req.body.post_min_chars, 0, 20000, 'Минимум, символов');
+      const max = requireInt(req.body.post_max_chars, 0, 20000, 'Максимум, символов');
+      if (min > 0 && max > 0 && min >= max) {
+        throw new Error('Минимум должен быть меньше максимума');
+      }
+      await settings.set('post_min_chars', String(min));
+      await settings.set('post_max_chars', String(max));
+      const описание = `${min > 0 ? `от ${min}` : 'без нижней границы'}, ` +
+        `${max > 0 ? `до ${max}` : 'без верхней границы'}`;
+      logger.info({ минимум: min, максимум: max, кто: req.user.login }, `Длина поста: ${описание}`);
+      res.redirect(`/settings?ok=${encodeURIComponent(`Длина поста: ${описание}`)}`);
+    } catch (error) {
+      logger.error(errFields(error), 'Сохранение длины поста упало');
       res.redirect(`/settings?err=${encodeURIComponent(error.message)}`);
     }
   });
@@ -2416,6 +2456,16 @@ function formatDate(value) {
 }
 
 /** Сколько шёл прогон. Секунды до минуты, дальше минуты — точнее в панели не нужно. */
+/** Границы длины поста человеческой строкой: ноль означает «без ограничения». */
+function postLengthLabel(map) {
+  const min = Number.parseInt(map.post_min_chars ?? '0', 10) || 0;
+  const max = Number.parseInt(map.post_max_chars ?? '0', 10) || 0;
+  if (min > 0 && max > 0) return `${min}-${max} символов`;
+  if (min > 0) return `от ${min} символов, верхней границы нет`;
+  if (max > 0) return `до ${max} символов`;
+  return 'без ограничений';
+}
+
 function durationText(from, to) {
   if (!from || !to) return '';
   const seconds = Math.max(0, Math.round((new Date(to) - new Date(from)) / 1000));

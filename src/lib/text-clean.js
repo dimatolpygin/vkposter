@@ -164,8 +164,15 @@ export function validatePost(text, { minChars, maxChars, adLink, topicName }) {
   const problems = [];
   const value = String(text ?? '');
 
-  if (value.length < minChars) problems.push(`коротко: ${value.length} символов, нужно от ${minChars}`);
-  if (value.length > maxChars) problems.push(`длинно: ${value.length} символов, нужно до ${maxChars}`);
+  // Ноль в любом из пределов = ограничения нет. Верхний предел по умолчанию снят по
+  // решению заказчика: у ВК в записи помещается порядка 16 тысяч символов, а лишние
+  // двести символов у хорошего в остальном поста не повод его выбрасывать.
+  if (minChars > 0 && value.length < minChars) {
+    problems.push(`коротко: ${value.length} символов, нужно от ${minChars}`);
+  }
+  if (maxChars > 0 && value.length > maxChars) {
+    problems.push(`длинно: ${value.length} символов, нужно до ${maxChars}`);
+  }
 
   // «Первый абзац» — первые два блока до пустой строки. Два, а не один: заголовок
   // приходит отдельным полем схемы, но модель нередко дублирует его первой строкой тела,
