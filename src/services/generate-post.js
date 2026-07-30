@@ -1,5 +1,5 @@
 import * as openrouter from '../lib/openrouter.js';
-import { cleanPostText, validatePost } from '../lib/text-clean.js';
+import { cleanPostText, validatePost, trimBulletLists } from '../lib/text-clean.js';
 import { projectDisplayName } from '../lib/topic.js';
 import { collectMaterial } from './research.js';
 import * as prompts from '../repo/prompts.js';
@@ -26,6 +26,9 @@ const POST_SCHEMA = {
   additionalProperties: false,
 };
 
+/** Сколько заходов сокращения делаем, прежде чем сдаться. */
+const SHRINK_ROUNDS = 3;
+
 /** Сколько исходного текста отдаём модели: больше 12 тысяч символов смысла не добавляет. */
 const MAX_SOURCE_CHARS = 12_000;
 
@@ -34,7 +37,7 @@ const MAX_SOURCE_CHARS = 12_000;
  * и идёт первой (порядок «стабильное начало → переменная часть в конце» — на случай,
  * когда провайдеры включат кеш промта).
  */
-function buildUserMessage(article, { researched = false } = {}) {
+function buildUserMessage(article, { researched = false, maxChars = 2200 } = {}) {
   // Название чистим: при обнаружении через sitemap тема равна slug'у адреса
   // («xrp-turbo-io-razoblachenie»), и в промт уходил жанровый хвост. Модель начинала
   // выкручиваться и склоняла «разоблачение» как часть имени проекта.
@@ -66,6 +69,15 @@ function buildUserMessage(article, { researched = false } = {}) {
     );
     if (article.title) lines.push('', `Известно о проекте: ${article.title}`);
   }
+
+  // Лимит длины есть и в промте клиента, но в самом его конце, среди прочих правил,
+  // и модель о нём забывает: живой прогон дал подряд 2534, 2918 и 3426 символов.
+  // Повтор рядом с задачей стоит одну строку и экономит переделки.
+  lines.push(
+    '',
+    `Длина поста строго до ${maxChars} символов вместе с рекламным блоком, ` +
+      `целься в ${targetChars(maxChars)}. Это жёсткое требование площадки.`,
+  );
 
   return lines.join('\n');
 }
@@ -109,6 +121,11 @@ function targetChars(maxChars) {
  * модель уже не сочиняет заново, а режет готовый текст.
  */
 async function shrinkBody(body, { maxChars, temperature, serviceTier }) {
+  const target = targetChars(maxChars);
+  // Доля, а не только абсолютное число: «убери примерно четверть текста» модель
+  // выполняет заметно точнее, чем «уложись в 2090 символов» — считать символы она
+  // не умеет и на голое число отвечает текстом прежней длины.
+  const cutPercent = Math.max(10, Math.round((1 - target / body.length) * 100));
   const result = await openrouter.chat({
     messages: [
       {
@@ -121,7 +138,10 @@ async function shrinkBody(body, { maxChars, temperature, serviceTier }) {
       {
         role: 'user',
         content:
-          `Сократи текст до ${targetChars(maxChars)} символов, сейчас ${body.length}.\n\n${body}`,
+          `Сократи этот текст примерно на ${cutPercent} процентов: сейчас ${body.length} ` +
+          `символов, нужно около ${target}. Каждое предложение сделай короче, ` +
+          'оставь по три пункта в каждом списке. Рекламный блок в конце и блок «Итог» ' +
+          `сохрани полностью.\n\n${body}`,
       },
     ],
     schema: { type: 'object', properties: { body: { type: 'string' } }, required: ['body'], additionalProperties: false },
@@ -165,7 +185,7 @@ export async function generatePost(article, { interactive = false } = {}) {
   // про конкретный проект. Не нашлось или упало — работаем как раньше, по теме.
   const research = await collectMaterial(article);
   const material = research ? { ...article, content: research.text } : article;
-  const userMessage = buildUserMessage(material, { researched: Boolean(research) });
+  const userMessage = buildUserMessage(material, { researched: Boolean(research), maxChars });
 
   let lastProblems = [];
   let lastError;
@@ -264,17 +284,47 @@ export async function generatePost(article, { interactive = false } = {}) {
     && lastProblems.every((problem) => problem.startsWith('длинно:'));
   if (!lastError && onlyLength && lastBody) {
     try {
-      const shrunk = await shrinkBody(lastBody, { maxChars, temperature, serviceTier });
-      const problems = validatePost(shrunk.body, rules);
+      const original = lastBody.length;
+      let body = lastBody;
+      let result = lastResult;
+
+      // Несколько заходов: модель сокращает, но недостаточно — с 3426 символов
+      // за раз получилось 3042. Каждый следующий заход считает долю от новой длины,
+      // поэтому текст сходится к лимиту, а не топчется около него.
+      for (let round = 1; round <= SHRINK_ROUNDS && body.length > maxChars; round += 1) {
+        const shrunk = await shrinkBody(body, { maxChars, temperature, serviceTier });
+        if (!shrunk.body || shrunk.body.length >= body.length) break;
+        body = shrunk.body;
+        result = shrunk.result;
+        logger.info(
+          { материал: article.id, заход: round, символов: body.length },
+          `Сокращение, заход ${round}: ${body.length} символов`,
+        );
+      }
+
+      // Не помогло словами — убираем лишние пункты списков. Промт просит по три,
+      // модель раздаёт по пять-шесть, и перебор обычно именно в них.
+      if (body.length > maxChars) {
+        const trimmed = trimBulletLists(body);
+        if (trimmed.length < body.length) {
+          logger.info(
+            { материал: article.id, было: body.length, стало: trimmed.length },
+            `Лишние пункты списков убраны: ${body.length} → ${trimmed.length} символов`,
+          );
+          body = trimmed;
+        }
+      }
+
+      const problems = validatePost(body, rules);
       if (problems.length === 0) {
         logger.info(
-          { материал: article.id, было: lastBody.length, стало: shrunk.body.length },
-          `Пост был длиннее лимита (${lastBody.length}) — сокращён до ${shrunk.body.length} символов`,
+          { материал: article.id, было: original, стало: body.length },
+          `Пост был длиннее лимита (${original}) — сокращён до ${body.length} символов`,
         );
-        return await savePost(lastTitle, shrunk.body, shrunk.result, maxAttempts + 1);
+        return await savePost(lastTitle, body, result, maxAttempts + 1);
       }
       logger.warn(
-        { материал: article.id, нарушения: problems },
+        { материал: article.id, символов: body.length, нарушения: problems },
         `Сокращение не помогло: ${problems.join('; ')}`,
       );
     } catch (error) {

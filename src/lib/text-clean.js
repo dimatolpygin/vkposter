@@ -112,6 +112,44 @@ export function cleanPostText(raw) {
 }
 
 /**
+ * Обрезка лишних пунктов в списках. Последняя мера против переросшего поста, когда
+ * модель уже трижды отказалась уложиться в лимит.
+ *
+ * Почему именно пункты: промт клиента просит по три пункта в двух блоках, а модель
+ * регулярно выдаёт по пять-шесть, и именно они дают перебор. Удаление лишних пунктов
+ * с конца блока не ломает ни структуру, ни рекламный блок, ни «Итог» — в отличие от
+ * обрезки текста по символам, которая оставляет пост оборванным на полуслове.
+ *
+ * @param {string} text
+ * @param {number} keepPerBlock сколько пунктов оставить в каждом блоке
+ */
+export function trimBulletLists(text, keepPerBlock = 3) {
+  const lines = String(text ?? '').split('\n');
+  const out = [];
+  let insideAd = false;
+  let bulletsInBlock = 0;
+
+  for (const line of lines) {
+    if (AD_SEPARATOR.test(line)) {
+      insideAd = !insideAd;
+      bulletsInBlock = 0;
+      out.push(line);
+      continue;
+    }
+    // В рекламном блоке не трогаем ничего: это дословный текст клиента.
+    if (!insideAd && /^\s*[—–-]\s+\S/.test(line)) {
+      bulletsInBlock += 1;
+      if (bulletsInBlock > keepPerBlock) continue;
+    } else if (line.trim() === '') {
+      bulletsInBlock = 0;
+    }
+    out.push(line);
+  }
+
+  return out.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+/**
  * Проверка поста на соответствие требованиям промта. Возвращает список нарушений;
  * пустой список = пост годен. Генерация повторяется, пока список не опустеет.
  *
