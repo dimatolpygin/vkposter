@@ -813,7 +813,11 @@ export function panelRouter() {
     try {
       const list = await posts.listRecent(30);
       const totals = await posts.countAll();
-      const nextArticle = await posts.nextArticleForGeneration();
+      // Выбранный источник живёт в адресе страницы: так его видно, им можно поделиться
+      // ссылкой и он не «прилипает» к системе, влияя на автоматический прогон.
+      const pickedSource = Number.parseInt(req.query.source ?? '', 10) || null;
+      const sourceCounts = await posts.readyCountsBySource();
+      const nextArticle = await posts.nextArticleForGeneration(pickedSource);
       const nextWithoutImage = await posts.nextWithoutImage();
       const nextToPublish = await posts.nextForPublishing();
 
@@ -878,6 +882,20 @@ export function panelRouter() {
           : ''}
         <div class="card">
           <h2 style="margin-top:0">Следующий материал в очереди</h2>
+          <form method="get" action="/posts" style="margin:0 0 14px">
+            <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+              <label>источник<br>
+                <select name="source">
+                  <option value=""${pickedSource ? '' : ' selected'}>все источники</option>
+                  ${sourceCounts
+                    .map((item) => `<option value="${item.id}"${
+                      pickedSource === item.id ? ' selected' : ''
+                    }>${esc(item.code)} (${item.ready})</option>`)
+                    .join('\n                  ')}
+                </select></label>
+              <button type="submit">Показать</button>
+            </div>
+          </form>
           ${nextArticle
             ? `<p style="margin:0 0 4px"><strong>${esc(nextArticle.topic_name ?? nextArticle.title ?? '')}</strong></p>
                <p class="hint" style="margin:0 0 12px">${esc(nextArticle.source_code)} ·
@@ -885,12 +903,18 @@ export function panelRouter() {
                  ${nextArticle.content ? `текст ${nextArticle.content.length} симв.` : 'только тема'} ·
                  <a href="${esc(nextArticle.url)}" target="_blank" rel="noopener">${esc(nextArticle.url)}</a></p>
                <form method="post" action="/posts/generate">
+                 <input type="hidden" name="source_id" value="${pickedSource ?? ''}">
                  <button type="submit" data-busy="Генерирую пост…">Сгенерировать пост</button>
                </form>`
-            : '<p class="hint" style="margin:0">Материалов, готовых к генерации, нет. ' +
-              'Проверьте источники в разделе «Источники».</p>'}
+            : pickedSource
+              ? '<p class="hint" style="margin:0">У этого источника готовых материалов нет. ' +
+                'Проверьте его в разделе «Источники» или выберите другой.</p>'
+              : '<p class="hint" style="margin:0">Материалов, готовых к генерации, нет. ' +
+                'Проверьте источники в разделе «Источники».</p>'}
           <p class="hint" style="margin:12px 0 0">
             Очередь идёт от свежих к старым. Темы, по которым пост уже есть, пропускаются.
+            Выбор источника действует только на эту кнопку: прогон по расписанию
+            по-прежнему берёт самое свежее со всех сайтов.
           </p>
         </div>
 
@@ -923,16 +947,24 @@ export function panelRouter() {
 
   router.post('/posts/generate', async (req, res) => {
     try {
+      const sourceId = Number.parseInt(req.body.source_id ?? '', 10) || null;
       const article = req.body.article_id
         ? await posts.findArticleForGeneration(Number.parseInt(req.body.article_id, 10))
-        : await posts.nextArticleForGeneration();
-      if (!article) throw new Error('Нет материалов, готовых к генерации');
+        : await posts.nextArticleForGeneration(sourceId);
+      if (!article) {
+        throw new Error(sourceId
+          ? 'У выбранного источника нет материалов, готовых к генерации'
+          : 'Нет материалов, готовых к генерации');
+      }
       // interactive: человек ждёт ответ, поэтому тир priority вместо flex
       const post = await generatePost(article, { interactive: true });
       res.redirect(`/posts/${post.id}?ok=${encodeURIComponent(`Пост #${post.id} готов`)}`);
     } catch (error) {
       logger.error(errFields(error), 'Генерация поста из панели упала');
-      res.redirect(`/posts?err=${encodeURIComponent(error.message)}`);
+      // Выбранный источник возвращаем в адрес: иначе после сбоя страница молча
+      // переключается на «все источники», и человек генерирует не то, что хотел.
+      const back = Number.parseInt(req.body.source_id ?? '', 10) || null;
+      res.redirect(`/posts?err=${encodeURIComponent(error.message)}${back ? `&source=${back}` : ''}`);
     }
   });
 

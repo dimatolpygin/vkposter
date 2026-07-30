@@ -361,8 +361,8 @@ export async function generatePost(article, { interactive = false } = {}) {
 }
 
 /** Следующий материал в очереди → пост. Используется кнопкой в панели и cron'ом (этап 9). */
-export async function generateNext(options = {}) {
-  const article = await posts.nextArticleForGeneration();
+export async function generateNext({ sourceId = null, ...options } = {}) {
+  const article = await posts.nextArticleForGeneration(sourceId);
   if (!article) throw new Error('Нет материалов, готовых к генерации');
   return generatePost(article, options);
 }

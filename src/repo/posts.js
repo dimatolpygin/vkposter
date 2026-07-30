@@ -176,8 +176,12 @@ export async function listRecent(limit = 30) {
 /**
  * Материал для следующей генерации: свежий, с известной темой, ещё не отработанный.
  * Темы, по которым пост уже есть, исключаются — это и есть учёт «уже публиковали».
+ *
+ * @param {number|null} [sourceId] брать только из этого источника. Нужно кнопке в панели:
+ *   очередь общая и идёт по дате, поэтому сайт, который публикует реже соседей, своей
+ *   очереди может ждать долго, а посмотреть на него хочется сейчас.
  */
-export async function nextArticleForGeneration() {
+export async function nextArticleForGeneration(sourceId = null) {
   const { rows } = await query(
     `SELECT a.id, a.url, a.title, a.content, a.topic_key, a.topic_name,
             COALESCE(a.published_at, a.lastmod) AS published_at,
@@ -188,10 +192,36 @@ export async function nextArticleForGeneration() {
         AND a.topic_key IS NOT NULL
         AND NOT EXISTS (SELECT 1 FROM posts p WHERE p.topic_key = a.topic_key AND p.status <> 'failed')
         AND (s.content_mode = 'topic_only' OR a.content IS NOT NULL)
+        AND ($1::int IS NULL OR a.source_id = $1)
       ORDER BY COALESCE(a.published_at, a.lastmod) DESC NULLS LAST
       LIMIT 1`,
+    [sourceId ?? null],
   );
   return rows[0] ?? null;
+}
+
+/**
+ * Сколько материалов готово к генерации у каждого источника. Нужно селектору в панели:
+ * выбирать источник вслепую бессмысленно, а «vklader (59)» сразу говорит, есть ли там что.
+ */
+export async function readyCountsBySource() {
+  const { rows } = await query(
+    `SELECT s.id, s.code, s.title, count(a.id)::int AS ready
+       FROM sources s
+       LEFT JOIN articles a
+         ON a.source_id = s.id
+        AND a.status IN ('new', 'fetched')
+        AND a.topic_key IS NOT NULL
+        AND (s.content_mode = 'topic_only' OR a.content IS NOT NULL)
+        AND NOT EXISTS (SELECT 1 FROM posts p
+                         WHERE p.topic_key = a.topic_key AND p.status <> 'failed')
+      GROUP BY s.id, s.code, s.title, s.is_active
+      -- Выключенный источник остаётся в списке, пока его материалы лежат в базе:
+      -- обходить сайт мы перестали, но написать пост по уже собранному можно.
+      HAVING s.is_active = true OR count(a.id) > 0
+      ORDER BY ready DESC, s.code`,
+  );
+  return rows;
 }
 
 /**
