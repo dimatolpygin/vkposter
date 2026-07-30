@@ -4,6 +4,9 @@ import { log } from '../logger.js';
 
 const logger = log('sitemap');
 
+/** Потолок на число дочерних карт за одну проверку: у крупных сайтов их бывают десятки. */
+const MAX_CHILD_MAPS = 40;
+
 /**
  * Чтение sitemap. Основной способ обнаружения новых материалов — карта сайта,
  * а не краулинг: она отдаёт готовый список URL с датой изменения.
@@ -90,9 +93,25 @@ export async function discoverViaSitemap(source, { since, until = null, limit })
     children = [{ loc: indexUrl, lastmod: null }];
   }
 
+  // Порядок карт можно использовать как «свежие сначала» только если lastmod у них
+  // действительно разные. У vklader генератор карт проставляет всем файлам одно и то же
+  // время перезаписи: сортировка ничего не меняет, порядок остаётся как в индексе,
+  // а там первым идёт архив 2015 года. С ранним выходом по лимиту обход набирал 50
+  // старых адресов из первой карты и до свежих (последний файл) не доходил никогда —
+  // источник был активен, а в очередь не попадал, потому что очередь идёт от свежих.
+  const stamps = new Set(children.map((entry) => entry.lastmod?.getTime() ?? 0));
+  const orderedByDate = stamps.size > 1;
+  if (!orderedByDate && children.length > 1) {
+    logger.info(
+      { источник: source.code, карт: children.length },
+      `${source.code}: у всех карт одинаковый lastmod — читаем их целиком, порядок ни о чём не говорит`,
+    );
+  }
+
   const found = [];
-  for (const child of children) {
-    if (found.length >= limit) break;
+  for (const child of children.slice(0, MAX_CHILD_MAPS)) {
+    // Ранний выход экономит запросы, но допустим только там, где порядок карт осмысленный.
+    if (orderedByDate && found.length >= limit) break;
     const xml = parsedIndex.isIndex ? await fetchXml(child.loc, label) : indexXml;
     const { entries } = parseSitemap(xml);
     // Верхняя граница применяется только к самим материалам, но не к выбору дочерних
