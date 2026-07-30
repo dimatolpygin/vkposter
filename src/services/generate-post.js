@@ -71,6 +71,69 @@ function buildUserMessage(article, { researched = false } = {}) {
 }
 
 /**
+ * Указание к переделке. Сам список нарушений модель понимает плохо: на «длинно: 2534
+ * символов, нужно до 2200» она возвращает такой же длинный текст три раза подряд —
+ * поймано на живом прогоне. Помогает не констатация, а задание: на сколько сократить,
+ * за счёт чего и что трогать нельзя.
+ */
+function fixInstruction(problems, { minChars, maxChars, length }) {
+  const lines = [
+    'Предыдущий вариант не прошёл проверку. Исправь ровно это и верни пост заново:\n— ' +
+      problems.join('\n— '),
+  ];
+  const tooLong = length > maxChars;
+  const tooShort = length < minChars;
+  if (tooLong) {
+    lines.push(
+      `Сократи текст на ${length - targetChars(maxChars)} символов и уложись в ${targetChars(maxChars)}. ` +
+        'Режь общие рассуждения и повторы, а не факты. Структуру (пункты списка, блок «Итог») ' +
+        'и рекламный блок со ссылкой оставь как есть.',
+    );
+  } else if (tooShort) {
+    lines.push(
+      `Добавь примерно ${minChars - length + 150} символов по существу проекта: ` +
+        'признаки, детали жалоб, что теряет человек. Воду не лей.',
+    );
+  }
+  return lines.join('\n\n');
+}
+
+/** Цель по длине: с запасом от потолка, иначе модель снова упирается в границу. */
+function targetChars(maxChars) {
+  return Math.max(200, maxChars - Math.max(100, Math.round(maxChars * 0.05)));
+}
+
+/**
+ * Последняя попытка спасти пост, который забракован ТОЛЬКО длиной. Отдельный вызов
+ * с одной задачей «сократи» работает там, где переписывание с нуля не помогает:
+ * модель уже не сочиняет заново, а режет готовый текст.
+ */
+async function shrinkBody(body, { maxChars, temperature, serviceTier }) {
+  const result = await openrouter.chat({
+    messages: [
+      {
+        role: 'system',
+        content:
+          'Ты редактор. Сокращаешь готовый пост, ничего не дописывая и не выдумывая. ' +
+          'Сохраняешь структуру, пункты списка, блок «Итог» и рекламный блок со ссылкой ' +
+          'дословно. Убираешь только повторы и общие рассуждения.',
+      },
+      {
+        role: 'user',
+        content:
+          `Сократи текст до ${targetChars(maxChars)} символов, сейчас ${body.length}.\n\n${body}`,
+      },
+    ],
+    schema: { type: 'object', properties: { body: { type: 'string' } }, required: ['body'], additionalProperties: false },
+    schemaName: 'vk_post_short',
+    temperature: Math.min(temperature, 0.4),
+    maxTokens: 1800,
+    serviceTier,
+  });
+  return { body: cleanPostText(result.data?.body ?? ''), result };
+}
+
+/**
  * Генерация поста по материалу.
  *
  * Повторы нужны не из-за сети (это забота http-client), а из-за качества: модель
@@ -107,6 +170,39 @@ export async function generatePost(article, { interactive = false } = {}) {
   let lastProblems = [];
   let lastError;
   let lastResult;
+  let lastBody = '';
+  let lastTitle = '';
+
+  const savePost = async (title, body, result, attempt) => {
+    const saved = await posts.create({
+      articleId: article.id,
+      title: title || article.topic_name || 'Без заголовка',
+      body,
+      model: result.model,
+      provider: result.provider,
+      promptVersion: prompt.version,
+      tokensIn: result.usage?.prompt_tokens ?? null,
+      tokensOut: result.usage?.completion_tokens ?? null,
+      costUsd: result.usage?.cost ?? null,
+      latencyMs: result.latencyMs,
+      attempts: attempt,
+      topicKey: article.topic_key,
+      requestId,
+    });
+    await posts.markArticleQueued(article.id);
+    logger.info(
+      {
+        пост: saved.id,
+        материал: article.id,
+        тема: article.topic_key,
+        символов: body.length,
+        попыток: attempt,
+        модель: result.model,
+      },
+      `Пост #${saved.id} готов: ${body.length} символов, попыток ${attempt}, модель ${result.model}`,
+    );
+    return saved;
+  };
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const messages = [
@@ -116,9 +212,7 @@ export async function generatePost(article, { interactive = false } = {}) {
     if (lastProblems.length > 0) {
       messages.push({
         role: 'user',
-        content:
-          'Предыдущий вариант не прошёл проверку. Исправь ровно это и верни пост заново:\n— ' +
-          lastProblems.join('\n— '),
+        content: fixInstruction(lastProblems, { minChars, maxChars, length: lastBody.length }),
       });
     }
 
@@ -141,6 +235,8 @@ export async function generatePost(article, { interactive = false } = {}) {
 
       if (problems.length > 0) {
         lastProblems = problems;
+        lastBody = body;
+        lastTitle = title;
         logger.warn(
           { материал: article.id, попытка: attempt, символов: body.length, нарушения: problems },
           `Пост не прошёл проверку (попытка ${attempt}/${maxAttempts}): ${problems.join('; ')}`,
@@ -148,35 +244,7 @@ export async function generatePost(article, { interactive = false } = {}) {
         continue;
       }
 
-      const saved = await posts.create({
-        articleId: article.id,
-        title: title || article.topic_name || 'Без заголовка',
-        body,
-        model: result.model,
-        provider: result.provider,
-        promptVersion: prompt.version,
-        tokensIn: result.usage?.prompt_tokens ?? null,
-        tokensOut: result.usage?.completion_tokens ?? null,
-        costUsd: result.usage?.cost ?? null,
-        latencyMs: result.latencyMs,
-        attempts: attempt,
-        topicKey: article.topic_key,
-        requestId,
-      });
-      await posts.markArticleQueued(article.id);
-
-      logger.info(
-        {
-          пост: saved.id,
-          материал: article.id,
-          тема: article.topic_key,
-          символов: body.length,
-          попыток: attempt,
-          модель: result.model,
-        },
-        `Пост #${saved.id} готов: ${body.length} символов, попыток ${attempt}, модель ${result.model}`,
-      );
-      return saved;
+      return await savePost(title, body, result, attempt);
     } catch (error) {
       lastError = error;
       // 400/401/402/403 повторять бессмысленно — это ключ, кредиты или запрос
@@ -185,6 +253,32 @@ export async function generatePost(article, { interactive = false } = {}) {
         { материал: article.id, попытка: attempt, ...errFields(error) },
         `Вызов ИИ упал на попытке ${attempt}/${maxAttempts}`,
       );
+    }
+  }
+
+  // Спасение поста, забракованного только длиной. Всё остальное в нём уже правильно:
+  // структура, рекламный блок, название проекта. Выбрасывать такой текст и терять тему
+  // из-за двух сотен лишних символов расточительно, а отдельный вызов «сократи» решает
+  // задачу, с которой не справляется переписывание с нуля.
+  const onlyLength = lastProblems.length > 0
+    && lastProblems.every((problem) => problem.startsWith('длинно:'));
+  if (!lastError && onlyLength && lastBody) {
+    try {
+      const shrunk = await shrinkBody(lastBody, { maxChars, temperature, serviceTier });
+      const problems = validatePost(shrunk.body, rules);
+      if (problems.length === 0) {
+        logger.info(
+          { материал: article.id, было: lastBody.length, стало: shrunk.body.length },
+          `Пост был длиннее лимита (${lastBody.length}) — сокращён до ${shrunk.body.length} символов`,
+        );
+        return await savePost(lastTitle, shrunk.body, shrunk.result, maxAttempts + 1);
+      }
+      logger.warn(
+        { материал: article.id, нарушения: problems },
+        `Сокращение не помогло: ${problems.join('; ')}`,
+      );
+    } catch (error) {
+      logger.warn({ материал: article.id, ...errFields(error) }, 'Сокращение поста упало');
     }
   }
 
