@@ -4,6 +4,7 @@ import * as runs from '../repo/runs.js';
 import { publicBaseReachable } from '../lib/media.js';
 import { buildPlan } from './plan-run.js';
 import { backfillArticles } from './backfill.js';
+import { refreshSources } from './refresh-sources.js';
 import { generatePost } from './generate-post.js';
 import { generateImageForPost } from './generate-image.js';
 import { publishPost, usingLocalPmpStub } from './publish-post.js';
@@ -132,6 +133,7 @@ async function executeCycle({ kind, groupIds, limitPerGroup, stepMinutes }) {
   const resumed = Boolean(run);
   let planReason = null;
   let backfilled = null;
+  let refreshed = null;
 
   if (run) {
     logger.warn(
@@ -139,6 +141,13 @@ async function executeCycle({ kind, groupIds, limitPerGroup, stepMinutes }) {
       `Найден незаконченный прогон #${run.id} — продолжаем его, новый план не строим`,
     );
   } else {
+    // Свежее с сайтов забираем до плана. Иначе прогон публикует накопленное в базе,
+    // а вышедшее сегодня попадёт в очередь только тогда, когда запас кончится.
+    refreshed = await refreshSources();
+    if (refreshed.skipped) {
+      logger.info({ причина: refreshed.skipped }, `Источники не обновлялись: ${refreshed.skipped}`);
+    }
+
     let plan = await buildPlan({ groupIds, limitPerGroup, stepMinutes });
 
     // Свежих материалов меньше, чем мест в группах — дочерпываем архив и строим план
@@ -170,6 +179,9 @@ async function executeCycle({ kind, groupIds, limitPerGroup, stepMinutes }) {
         добор: backfilled
           ? `${backfilled.added} материалов за ${backfilled.days} дней`
           : null,
+        обновление: refreshed?.checked
+          ? `${refreshed.checked} источников, ${refreshed.added} новых материалов`
+          : (refreshed?.skipped ?? null),
       },
     });
     await runs.addItems(runId, plan.items);

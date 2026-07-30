@@ -370,6 +370,36 @@ export function panelRouter() {
           </form>
         </div>
         <div class="card">
+          <h2 style="margin-top:0">Обновление источников</h2>
+          <p class="hint" style="margin:0 0 12px">
+            Перед каждым прогоном система обходит все включённые сайты и забирает то,
+            что вышло со времени прошлой проверки. Сначала в дело идёт свежее, и только
+            когда его не хватает на план, подключается добор из архива.
+            «Текстов за проверку» - сколько статей скачивается с одного сайта за раз;
+            материал без текста в очередь не попадает, поэтому слишком низкое значение
+            держит часть тем в базе мёртвым грузом.
+          </p>
+          <form method="post" action="/settings/sources-refresh">
+            <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end">
+              <label>обновление<br>
+                <select name="refresh_sources_enabled">
+                  <option value="on"${map.refresh_sources_enabled === 'on' ? ' selected' : ''}>включено</option>
+                  <option value="off"${map.refresh_sources_enabled === 'off' ? ' selected' : ''}>выключено</option>
+                </select></label>
+              <label>не чаще раза в, мин<br>
+                <input type="number" name="refresh_sources_min_age_minutes" min="0" max="1440"
+                       value="${esc(map.refresh_sources_min_age_minutes)}" style="width:100px"></label>
+              <label>адресов за проверку<br>
+                <input type="number" name="discovery_limit_per_source" min="1" max="500"
+                       value="${esc(map.discovery_limit_per_source)}" style="width:100px"></label>
+              <label>текстов за проверку<br>
+                <input type="number" name="extract_limit_per_check" min="1" max="200"
+                       value="${esc(map.extract_limit_per_check)}" style="width:100px"></label>
+              <button type="submit">Сохранить</button>
+            </div>
+          </form>
+        </div>
+        <div class="card">
           <h2 style="margin-top:0">Добор старых тем</h2>
           <p class="hint" style="margin:0 0 12px">
             Когда свежих материалов меньше, чем мест в группах, прогон сам перечитывает
@@ -595,6 +625,35 @@ export function panelRouter() {
       );
     } catch (error) {
       logger.error(errFields(error), 'Сохранение настроек добора упало');
+      res.redirect(`/settings?err=${encodeURIComponent(error.message)}`);
+    }
+  });
+
+  router.post('/settings/sources-refresh', async (req, res) => {
+    try {
+      const enabled = req.body.refresh_sources_enabled === 'off' ? 'off' : 'on';
+      const minAge = requireInt(req.body.refresh_sources_min_age_minutes, 0, 1440,
+        'Не чаще, чем раз в N минут');
+      const discovery = requireInt(req.body.discovery_limit_per_source, 1, 500,
+        'Материалов за проверку');
+      const extract = requireInt(req.body.extract_limit_per_check, 1, 200, 'Текстов за проверку');
+      await settings.set('refresh_sources_enabled', enabled);
+      await settings.set('refresh_sources_min_age_minutes', String(minAge));
+      await settings.set('discovery_limit_per_source', String(discovery));
+      await settings.set('extract_limit_per_check', String(extract));
+      logger.info(
+        { обновление: enabled, пауза: minAge, адресов: discovery, текстов: extract, кто: req.user.login },
+        `Обновление источников ${enabled === 'on' ? 'включено' : 'выключено'}, ` +
+          `${discovery} адресов и ${extract} текстов за проверку`,
+      );
+      res.redirect(
+        `/settings?ok=${encodeURIComponent(
+          `Обновление источников ${enabled === 'on' ? 'включено' : 'выключено'}, ` +
+            `текстов за проверку ${extract}`,
+        )}`,
+      );
+    } catch (error) {
+      logger.error(errFields(error), 'Сохранение настроек обновления источников упало');
       res.redirect(`/settings?err=${encodeURIComponent(error.message)}`);
     }
   });
