@@ -41,6 +41,32 @@ export async function freshnessCutoff() {
 }
 
 /**
+ * Признаки страницы-заглушки антибота вместо статьи.
+ *
+ * Поймано на живом прогоне: vklader закрыт DDoS-Guard, и после блокировки адреса сервера
+ * firecrawl вернул «Checking your browser before accessing vklader.com» — 251 символ.
+ * Проверка «текста больше 200 символов» это пропустила, заглушка легла в базу как текст
+ * статьи, и пост про проект CLW был написан по ней. Такие страницы надо отличать от
+ * коротких статей: материал не испорчен, его просто надо перечитать позже.
+ */
+const BOT_WALL_MARKERS = [
+  'ddos-guard',
+  'checking your browser',
+  'just a moment',
+  'cf-browser-verification',
+  'enable javascript and cookies',
+  'проверка браузера',
+  'доступ ограничен',
+];
+
+function looksLikeBotWall(text, title) {
+  const value = `${title ?? ''}\n${text ?? ''}`.toLowerCase();
+  // Длинная страница с этими словами — обычная статья про блокировки, а не заглушка.
+  if (value.length > 1500) return false;
+  return BOT_WALL_MARKERS.some((marker) => value.includes(marker));
+}
+
+/**
  * Извлечение текста одного материала.
  * Порядок попыток осознанный: сначала WP REST API (бесплатно и полный текст),
  * firecrawl — только как страховка, потому что у него 1000 запросов в месяц на проект.
@@ -65,6 +91,11 @@ export async function extractOne(source, article) {
     throw new Error('Текст не извлечён: WP API не дал результата, а FIRECRAWL_API_KEY не задан');
   }
   const { markdown, title } = await firecrawl.scrape(article.url);
+  if (looksLikeBotWall(markdown, title)) {
+    const error = new Error('Сайт закрыт защитой от ботов — вместо статьи отдана заглушка');
+    error.botWall = true;
+    throw error;
+  }
   return { title: title ?? article.title, text: markdown, via: 'firecrawl' };
 }
 
@@ -167,7 +198,18 @@ export async function checkSource(source, {
           );
         } catch (error) {
           stats.extractFailed += 1;
-          await articles.markFailed(article.id, error.message);
+          // Заглушка антибота — временная беда сайта, а не брак материала: помечать
+          // «failed» нельзя, иначе статья выбывает навсегда из-за одной блокировки.
+          // Оставляем статус как есть, причину пишем в журнал, перечитаем в другой раз.
+          if (error.botWall) {
+            stats.botWalls = (stats.botWalls ?? 0) + 1;
+            logger.warn(
+              { url: article.url },
+              'Сайт отдал страницу защиты от ботов — материал оставлен на следующий раз',
+            );
+          } else {
+            await articles.markFailed(article.id, error.message);
+          }
           await captureError('извлечение текста', error, {
             sourceId: source.id,
             articleId: article.id,
