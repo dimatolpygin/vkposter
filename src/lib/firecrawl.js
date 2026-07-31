@@ -18,9 +18,17 @@ export function isConfigured() {
 
 /**
  * Забирает страницу в markdown.
+ *
+ * `fresh` обходит кэш firecrawl. Кэш по умолчанию живёт двое суток и обычно экономит
+ * лимит, но однажды он стоил нам статьи: vklader под DDoS-Guard отдал заглушку
+ * «Checking your browser», она осела в кэше, и все следующие запросы возвращали ровно
+ * её — с тем же Request ID и вчерашним временем. Свежий запрос той же страницы дал
+ * 4029 символов нормального текста. Поэтому кэш остаётся по умолчанию, а повтор без
+ * него делается там, где ответ выглядит подозрительно.
+ *
  * @returns {Promise<{markdown: string, title: string|null, links: string[]}>}
  */
-export async function scrape(url, { onlyMainContent = true, includeLinks = false } = {}) {
+export async function scrape(url, { onlyMainContent = true, includeLinks = false, fresh = false } = {}) {
   if (!isConfigured()) {
     throw new Error('FIRECRAWL_API_KEY не задан — извлечение через firecrawl недоступно');
   }
@@ -34,7 +42,7 @@ export async function scrape(url, { onlyMainContent = true, includeLinks = false
     method: 'POST',
     label: 'firecrawl',
     headers: { Authorization: `Bearer ${config.firecrawl.apiKey}` },
-    json: { url, formats, onlyMainContent },
+    json: { url, formats, onlyMainContent, ...(fresh ? { maxAge: 0 } : {}) },
     timeoutMs: config.firecrawl.timeoutMs,
     retries: 2,
     baseDelayMs: 3000,

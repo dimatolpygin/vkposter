@@ -90,7 +90,17 @@ export async function extractOne(source, article) {
   if (!firecrawl.isConfigured()) {
     throw new Error('Текст не извлечён: WP API не дал результата, а FIRECRAWL_API_KEY не задан');
   }
-  const { markdown, title } = await firecrawl.scrape(article.url);
+  let { markdown, title } = await firecrawl.scrape(article.url);
+
+  // Заглушка могла прийти не с сайта, а из кэша firecrawl: он живёт двое суток, и одна
+  // неудачная попытка залипает в нём вместе со страницей проверки браузера. Повторяем
+  // без кэша — на живом примере это дало 4029 символов статьи вместо 251 символа
+  // заглушки. Лишний расход лимита только в проблемном случае, не на каждой странице.
+  if (looksLikeBotWall(markdown, title)) {
+    logger.info({ url: article.url }, 'Ответ похож на страницу защиты от ботов — повторяю без кэша');
+    ({ markdown, title } = await firecrawl.scrape(article.url, { fresh: true }));
+  }
+
   if (looksLikeBotWall(markdown, title)) {
     const error = new Error('Сайт закрыт защитой от ботов — вместо статьи отдана заглушка');
     error.botWall = true;
