@@ -234,10 +234,28 @@ function mentionsProject(paragraph, topicName) {
   // Транслит с обеих сторон: название латиницей, а пост кириллицей (и наоборот) —
   // обычное дело, «Atlas capital» против «Атлас Капитал».
   const haystackFolded = foldLatin(haystack);
-  return words.some((word, index) => {
+  if (words.some((word, index) => {
     const value = word.toLowerCase();
     if (value.length >= 4 && haystack.includes(value)) return true;
     const key = folded[index];
     return key.length >= 4 && haystackFolded.includes(key);
+  })) return true;
+
+  // Короткие названия. Порог в четыре символа взят против ложных совпадений: обрывок
+  // из двух букв найдётся в любом тексте. Но проект «CLW» — это всё название целиком,
+  // и раньше проверка для него проваливалась всегда, каким бы ни был пост: на проде
+  // это стоило трёх попыток генерации и потерянной темы. Ищем такое название как
+  // отдельное слово, по границам, в исходном тексте, а не в сжатом.
+  const short = words.filter((word) => word.length >= 2 && word.length < 4);
+  if (short.length === 0) return false;
+  const paragraphFolded = foldLatin(paragraph);
+  return short.some((word) => {
+    const value = word.toLowerCase();
+    const asWord = new RegExp(`(?<![\\p{L}\\p{N}])${escapeRe(value)}(?![\\p{L}\\p{N}])`, 'u');
+    return asWord.test(paragraph) || asWord.test(paragraphFolded);
   });
+}
+
+function escapeRe(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
