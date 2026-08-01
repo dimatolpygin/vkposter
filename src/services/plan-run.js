@@ -85,7 +85,15 @@ export async function buildPlan({ now = new Date(), groupIds, limitPerGroup, ste
       label: row.topic_name ?? row.title ?? row.url,
       needsImage: true,
     })),
-  ].sort((a, b) => dateValue(b.date) - dateValue(a.date));
+  ].sort((a, b) => {
+    // Готовый пост идёт раньше нового материала, даже если материал свежее. Причина
+    // денежная: за текст такого поста уже заплачено, и он ждёт только обложки. Когда
+    // сортировка была общей по дате, хвост постов, сделанных неделю назад, оттеснялся
+    // сегодняшними темами и мог не опубликоваться никогда — а именно так выглядит
+    // очередь после дня, когда на обложки не хватило кредитов.
+    if (a.kind !== b.kind) return a.kind === 'post' ? -1 : 1;
+    return dateValue(b.date) - dateValue(a.date);
+  });
 
   if (candidates.length === 0) {
     return {
