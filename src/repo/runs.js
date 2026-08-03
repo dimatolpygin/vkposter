@@ -89,6 +89,49 @@ export async function unfinishedCycle() {
 }
 
 /**
+ * Сколько прогонов подряд упало после последнего удачного. Нужно планировщику:
+ * повторять сбойный прогон стоит, но не бесконечно — иначе при системной беде
+ * (нет кредитов, лежит провайдер) он будет перезапускаться до конца суток.
+ */
+export async function failedCyclesInRow() {
+  const { rows } = await query(
+    `SELECT count(*)::int AS count FROM runs
+      WHERE kind IN ('cron', 'manual', 'backfill')
+        AND status = 'failed'
+        AND started_at > GREATEST(
+          COALESCE(
+            (SELECT max(started_at) FROM runs
+              WHERE kind IN ('cron', 'manual', 'backfill') AND status = 'done'),
+            '-infinity'::timestamptz),
+          -- Полусуточное окно: вчерашние сбои не должны съедать сегодняшние попытки.
+          now() - interval '12 hours')`,
+  );
+  return rows[0].count;
+}
+
+/**
+ * Закрыть прогоны, застрявшие в статусе «идёт».
+ *
+ * Прогон, упавший между «начат» и первым слотом, некому перевести в конечный статус:
+ * цикла ещё нет. На проде так повисли два прогона подряд, и в панели оба выглядели
+ * как работающие. Условие «нет ни одного слота в работе» отличает застрявший прогон
+ * от живого: у исполняемого слот всегда в статусе `planned` или `generated`.
+ */
+export async function closeStaleRunning(olderThanMinutes = 120) {
+  const { rows } = await query(
+    `UPDATE runs SET status = 'failed', finished_at = now(),
+            error = COALESCE(error, 'Прогон прерван: не осталось слотов в работе')
+      WHERE status = 'running'
+        AND started_at < now() - ($1 || ' minutes')::interval
+        AND NOT EXISTS (SELECT 1 FROM run_items i
+                         WHERE i.run_id = runs.id AND i.status IN ('planned', 'generated'))
+      RETURNING id`,
+    [String(olderThanMinutes)],
+  );
+  return rows.map((row) => Number(row.id));
+}
+
+/**
  * Записать план прогона. Одна вставка на все слоты: частично записанный план — это
  * прогон, который при продолжении не знает про свой же хвост.
  */

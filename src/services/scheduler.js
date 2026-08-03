@@ -1,7 +1,7 @@
 import * as runs from '../repo/runs.js';
 import * as settings from '../repo/settings.js';
 import { nextRunAt, isRunDue, scheduleText } from '../lib/schedule.js';
-import { startCycleInBackground, runningSince } from './run-cycle.js';
+import { startCycleInBackground, runningSince, lastBackgroundFailureAt } from './run-cycle.js';
 import { captureError } from './capture-error.js';
 import { runWithContext, newRequestId } from '../context.js';
 import { log, errFields } from '../logger.js';
@@ -26,6 +26,34 @@ const logger = log('планировщик');
  */
 
 const TICK_MS = 60_000;
+
+/**
+ * Сколько раз подряд повторять упавший прогон.
+ *
+ * Без повтора один сбой стоит целого дня публикаций: в ежедневном режиме следующая
+ * попытка была бы только завтра. Ровно так вышло 02 и 03 августа — прогон падал на
+ * записи плана, и оба дня остались без постов. Потолок нужен по обратной причине:
+ * при системной беде (кончились кредиты, лежит провайдер) повторы бессмысленны,
+ * и до конца суток они превратятся в десяток одинаковых записей в журнале.
+ */
+const MAX_RETRIES = 3;
+
+/**
+ * Причины, по которым повторять нечего: это не сбой, а нормальный ответ системы.
+ * Материалы и лимиты за пятнадцать минут не появятся.
+ */
+const NO_RETRY_MARKERS = [
+  'дневные лимиты',
+  'нет материалов',
+  'нет включённых групп',
+  'планировать нечего',
+];
+
+function retryableFailure(run) {
+  if (run?.status !== 'failed') return false;
+  const reason = String(run.error ?? '').toLowerCase();
+  return !NO_RETRY_MARKERS.some((marker) => reason.includes(marker));
+}
 /** Первый тик — не сразу: даём приложению доподняться и не стартуем прогон в момент деплоя. */
 const FIRST_TICK_MS = 90_000;
 
@@ -78,12 +106,43 @@ async function tick() {
     // из одинаковых ошибок в логе.
     const retryMs = Math.max(1, Number.parseInt(map.scheduler_retry_minutes ?? '15', 10) || 15) * 60_000;
     if (lastFailureAt && Date.now() - lastFailureAt < retryMs) return;
+    // Прогон падает уже в фоне, когда планировщик считает запуск удавшимся. Пауза
+    // после такого падения — единственное, что удерживает от запуска каждую минуту.
+    const backgroundFailureAt = lastBackgroundFailureAt();
+    if (backgroundFailureAt && Date.now() - backgroundFailureAt < retryMs) return;
+
+    // Прогон, застрявший в статусе «идёт», в панели выглядит работающим, а на деле
+    // держит точку отсчёта расписания. Закрываем такие до расчёта якоря.
+    const closed = await runs.closeStaleRunning();
+    if (closed.length) {
+      logger.warn({ прогоны: closed }, `Закрыты зависшие прогоны: ${closed.join(', ')}`);
+    }
 
     // Якорь: последний прогон, а если прогонов не было — момент включения автозапуска.
     // Без второго варианта режим «каждые N часов» на пустой базе не стартовал бы никогда.
     const last = await runs.lastCycle();
     const anchor = last?.started_at ?? map.schedule_enabled_at ?? null;
-    if (!isRunDue(map, anchor)) return;
+
+    let retry = false;
+    if (!isRunDue(map, anchor)) {
+      // Время по расписанию не пришло, но прошлый прогон упал — это и есть повтор.
+      if (!retryableFailure(last)) return;
+      const since = last.finished_at ?? last.started_at;
+      if (Date.now() - new Date(since).getTime() < retryMs) return;
+      const attempts = await runs.failedCyclesInRow();
+      if (attempts >= MAX_RETRIES) {
+        logger.warn(
+          { попыток: attempts, причина: last.error },
+          `Прогон падает ${attempts} раз подряд — повторы остановлены до следующего расписания`,
+        );
+        return;
+      }
+      retry = true;
+      logger.warn(
+        { прогон: last.id, попытка: attempts + 1, причина: last.error },
+        `Повтор упавшего прогона #${last.id} (попытка ${attempts + 1} из ${MAX_RETRIES})`,
+      );
+    }
 
     await runWithContext({ requestId: newRequestId('cron'), source: 'планировщик' }, async () => {
       const { started, reason } = startCycleInBackground({ kind: 'cron' });
@@ -99,8 +158,10 @@ async function tick() {
       lastFailureAt = null;
       lastFailureReason = null;
       logger.info(
-        { расписание: scheduleText(map), было_в: last?.started_at ?? null },
-        `Автозапуск по расписанию (${scheduleText(map)}) — прогон стартовал`,
+        { расписание: scheduleText(map), было_в: last?.started_at ?? null, повтор: retry },
+        retry
+          ? 'Повторный запуск после сбоя — прогон стартовал'
+          : `Автозапуск по расписанию (${scheduleText(map)}) — прогон стартовал`,
       );
     });
   } catch (error) {

@@ -42,6 +42,14 @@ let current = null;
 let lastError = null;
 
 /**
+ * Момент падения фонового прогона. Планировщик считает запуск удавшимся сразу после
+ * старта, а прогон падает уже в фоне, минуту-две спустя. Без этой отметки он видел
+ * «прогон стартовал», а прогон, упавший до записи плана, не обновлял и точку отсчёта
+ * расписания — и запуск повторялся каждую минуту, наполняя журнал одинаковыми сбоями.
+ */
+let lastFailureAt = null;
+
+/**
  * @param {object} [options]
  * @param {'cron'|'manual'|'backfill'} [options.kind] чем инициирован прогон
  * @param {number[]} [options.groupIds] ограничить группами (ручной прогон)
@@ -84,6 +92,7 @@ export function startCycleInBackground(options = {}) {
 
   const startedAt = Date.now();
   lastError = null;
+  lastFailureAt = null;
   const task = runCycle(options)
     .then((result) => {
       logger.info({ прогон: result.runId }, `Фоновый прогон #${result.runId} завершён`);
@@ -93,6 +102,7 @@ export function startCycleInBackground(options = {}) {
       // Прогон в фоне: ошибку некому вернуть в ответе, поэтому она оседает здесь
       // и показывается в карточке прогона до следующего запуска.
       lastError = error.message;
+      lastFailureAt = Date.now();
       // Прогон в фоне: ответа с ошибкой нет, поэтому кроме карточки на «Обзоре»
       // сбой должен остаться в журнале — иначе после следующего запуска о нём
       // не останется следа нигде, кроме логов контейнера.
@@ -115,6 +125,11 @@ export function runningSince() {
 /** Ошибка последнего фонового прогона: ответа с ней не было, показываем в панели. */
 export function lastBackgroundError() {
   return lastError;
+}
+
+/** Когда фоновый прогон упал в последний раз (для паузы перед повтором). */
+export function lastBackgroundFailureAt() {
+  return lastFailureAt;
 }
 
 async function executeCycle({ kind, groupIds, limitPerGroup, stepMinutes }) {
