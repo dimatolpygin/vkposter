@@ -184,7 +184,16 @@ async function executeCycle({ kind, groupIds, limitPerGroup, stepMinutes }) {
           : (refreshed?.skipped ?? null),
       },
     });
-    await runs.addItems(runId, plan.items);
+    // Запись плана — единственный шаг между «прогон начат» и «прогон исполняется».
+    // Если она упадёт, прогон навсегда останется в статусе «идёт»: цикла ещё нет,
+    // finishRun не позовут, а панель будет показывать вечно работающий прогон.
+    // Ровно так 03.08 повис прогон #59, отбитый уникальным индексом run_items.
+    try {
+      await runs.addItems(runId, plan.items);
+    } catch (error) {
+      await runs.finishRun(runId, { status: 'failed', error: error.message });
+      throw error;
+    }
     run = { id: runId };
     logger.info(
       { прогон: runId, слотов: plan.items.length },

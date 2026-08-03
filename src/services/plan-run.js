@@ -95,7 +95,26 @@ export async function buildPlan({ now = new Date(), groupIds, limitPerGroup, ste
     return dateValue(b.date) - dateValue(a.date);
   });
 
-  if (candidates.length === 0) {
+  // Один материал — один слот. Уникальный индекс `run_items (run_id, article_id)` это
+  // гарантирует, но падением всей вставки: 03.08 план не записался целиком и постов за
+  // день не вышло вовсе. Причина была в двух готовых постах на один материал (#5 и #6 по
+  // merabo, сделаны вручную на этапе проверки) — очередь такого не запрещает. Лишний
+  // кандидат отбрасывается здесь, до вставки; оставшийся выигрывает по порядку сортировки.
+  const seen = new Set();
+  const unique = candidates.filter((item) => {
+    if (!item.articleId) return true;
+    if (seen.has(item.articleId)) {
+      logger.warn(
+        { материал: item.articleId, пост: item.postId, тема: item.label },
+        `Материал #${item.articleId} уже есть в плане — второй пост по нему пропущен`,
+      );
+      return false;
+    }
+    seen.add(item.articleId);
+    return true;
+  });
+
+  if (unique.length === 0) {
     return {
       items: [],
       groups: quotas,
@@ -110,11 +129,11 @@ export async function buildPlan({ now = new Date(), groupIds, limitPerGroup, ste
   const left = quotas.map((item) => ({ ...item, left: item.quota }));
   const assignments = [];
   let cursor = 0;
-  while (cursor < candidates.length && left.some((item) => item.left > 0)) {
+  while (cursor < unique.length && left.some((item) => item.left > 0)) {
     let placed = false;
     for (const slot of left) {
-      if (slot.left === 0 || cursor >= candidates.length) continue;
-      assignments.push({ group: slot.group, candidate: candidates[cursor] });
+      if (slot.left === 0 || cursor >= unique.length) continue;
+      assignments.push({ group: slot.group, candidate: unique[cursor] });
       cursor += 1;
       slot.left -= 1;
       placed = true;
@@ -153,9 +172,9 @@ export async function buildPlan({ now = new Date(), groupIds, limitPerGroup, ste
   }));
 
   logger.info(
-    { слотов: items.length, групп: active.length, ёмкость: capacity, кандидатов: candidates.length },
+    { слотов: items.length, групп: active.length, ёмкость: capacity, кандидатов: unique.length },
     `План прогона: ${items.length} постов на ${active.length} групп ` +
-      `(ёмкость ${capacity}, кандидатов ${candidates.length})`,
+      `(ёмкость ${capacity}, кандидатов ${unique.length})`,
   );
 
   return {
