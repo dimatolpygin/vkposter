@@ -43,6 +43,10 @@ const NOISE = new Set([
   'proekt', 'proekta', 'proekte', 'broker', 'brokera', 'brokerov', 'trejder', 'treider',
   'trader', 'kompaniya', 'kompanii', 'kompanija', 'investicionnogo', 'investicionnaya',
   'investicionnoj', 'klientov', 'kriptovalyutnyj',
+  // обломки адреса: тема, обнаруженная по slug, иногда начинается прямо с протокола
+  // («https-playfortunage8d959-com-ru-login»), и «https» уезжало в название проекта.
+  // Проверить пост по такому названию нельзя ни при каком тексте.
+  'http', 'https', 'www', 'html', 'php', 'index', 'login',
   // служебные части речи и мусор
   'ili', 'net', 'da', 'ne', 'i', 'v', 'o', 'ob', 'obo', 'na', 's', 'so', 'po', 'iz',
   'dlya', 'kak', 'chto', 'eto', 'vse', 'li', 'a', 'no', 'the', 'of', 'and',

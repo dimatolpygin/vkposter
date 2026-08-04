@@ -157,6 +157,69 @@ async function shrinkBody(body, { maxChars, temperature, serviceTier }) {
 }
 
 /**
+ * Рекламный блок клиента из активного промта: строки вокруг ссылки, ограниченные
+ * рядами дефисов.
+ *
+ * Блок неизменный и дословный, поэтому забытый моделью блок — не повод переписывать
+ * пост и класть в журнал ошибку: его достаточно дописать. Берём его из промта, а не
+ * из отдельной настройки, чтобы правка промта клиентом не разъезжалась с кодом.
+ */
+export function adBlockFromPrompt(promptBody, adLink) {
+  if (!promptBody || !adLink) return null;
+  const lines = String(promptBody).split('\n');
+  const at = lines.findIndex((line) => line.includes(adLink));
+  if (at === -1) return null;
+
+  const isSeparator = (line) => /^\s*-{4,}\s*$/.test(line);
+  let from = at;
+  while (from > 0 && !isSeparator(lines[from - 1])) from -= 1;
+  let to = at;
+  while (to < lines.length - 1 && !isSeparator(lines[to + 1])) to += 1;
+  if (from === 0 || to === lines.length - 1) return null;
+
+  const block = ['--------', ...lines.slice(from, to + 1), '------'].join('\n');
+  // Через ту же чистку, что и текст поста: в промте ссылка записана markdown-ссылкой,
+  // а в посте она должна остаться голым адресом.
+  return cleanPostText(block);
+}
+
+/**
+ * Спасение поста, забракованного ТОЛЬКО отсутствием названия проекта в первом абзаце.
+ *
+ * Случай тот же по смыслу, что и перебор по длине: текст правильный целиком, претензия
+ * ровно одна и правится одной фразой. Переписывать пост с нуля из-за этого — терять
+ * оплаченную генерацию и класть в журнал ошибку, которой клиент не может ничего
+ * противопоставить. Просим вписать название в зачин, остальное не трогая.
+ */
+async function nameInLead(body, projectName, { temperature, serviceTier }) {
+  const result = await openrouter.chat({
+    messages: [
+      {
+        role: 'system',
+        content:
+          'Ты редактор. Правишь готовый пост минимально: меняешь только первый абзац, ' +
+          'остальной текст, пункты списков, блок «Итог» и рекламный блок переносишь дословно. ' +
+          'Ничего не выдумываешь и не дописываешь от себя.',
+      },
+      {
+        role: 'user',
+        content:
+          `В первом абзаце должно прямо звучать название проекта: «${projectName}». ` +
+          'Перепиши только первый абзац так, чтобы название стояло в нём в именительном ' +
+          'падеже, а смысл и длина остались прежними. Остальной текст верни без ' +
+          `изменений.\n\n${body}`,
+      },
+    ],
+    schema: { type: 'object', properties: { body: { type: 'string' } }, required: ['body'], additionalProperties: false },
+    schemaName: 'vk_post_lead',
+    temperature: Math.min(temperature, 0.4),
+    maxTokens: 2400,
+    serviceTier,
+  });
+  return { body: cleanPostText(result.data?.body ?? ''), result };
+}
+
+/**
  * Генерация поста по материалу.
  *
  * Повторы нужны не из-за сети (это забота http-client), а из-за качества: модель
@@ -279,6 +342,25 @@ export async function generatePost(article, { interactive = false } = {}) {
     }
   }
 
+  // Забытый рекламный блок дописывается кодом: он неизменный и дословный, просить
+  // модель повторить его — лишний вызов и лишний повод для брака.
+  if (!lastError && lastBody && lastProblems.some((problem) => problem.startsWith('нет рекламного блока'))) {
+    const block = adBlockFromPrompt(prompt.body, adLink);
+    if (block) {
+      const withAd = `${lastBody.trimEnd()}\n\n${block}`;
+      const problems = validatePost(withAd, rules);
+      if (!problems.some((problem) => problem.startsWith('нет рекламного блока'))) {
+        logger.info(
+          { материал: article.id, символов: withAd.length },
+          'Рекламный блок отсутствовал в ответе модели — дописан из промта',
+        );
+        lastBody = withAd;
+        lastProblems = problems;
+        if (problems.length === 0) return await savePost(lastTitle, withAd, lastResult, maxAttempts + 1);
+      }
+    }
+  }
+
   // Спасение поста, забракованного только длиной. Всё остальное в нём уже правильно:
   // структура, рекламный блок, название проекта. Выбрасывать такой текст и терять тему
   // из-за двух сотен лишних символов расточительно, а отдельный вызов «сократи» решает
@@ -335,6 +417,30 @@ export async function generatePost(article, { interactive = false } = {}) {
     }
   }
 
+  // Та же логика спасения, но для единственной претензии «нет названия в первом абзаце».
+  // На проде это самая частая запись в журнале, и почти всегда — при правильном посте.
+  const onlyProject = lastProblems.length > 0
+    && lastProblems.every((problem) => problem.startsWith('в первом абзаце нет названия'));
+  if (!lastError && onlyProject && lastBody && rules.topicName) {
+    try {
+      const fixed = await nameInLead(lastBody, rules.topicName, { temperature, serviceTier });
+      const problems = fixed.body ? validatePost(fixed.body, rules) : ['пустой ответ'];
+      if (problems.length === 0) {
+        logger.info(
+          { материал: article.id, проект: rules.topicName },
+          `Название проекта вписано в первый абзац отдельной правкой («${rules.topicName}»)`,
+        );
+        return await savePost(lastTitle, fixed.body, fixed.result, maxAttempts + 1);
+      }
+      logger.warn(
+        { материал: article.id, нарушения: problems },
+        `Правка первого абзаца не помогла: ${problems.join('; ')}`,
+      );
+    } catch (error) {
+      logger.warn({ материал: article.id, ...errFields(error) }, 'Правка первого абзаца упала');
+    }
+  }
+
   const reason = lastError
     ? lastError.message
     : `валидация не прошла за ${maxAttempts} попыток: ${lastProblems.join('; ')}`;
@@ -357,7 +463,12 @@ export async function generatePost(article, { interactive = false } = {}) {
     articleId: article.id,
     postId: failed.id,
   });
-  throw new Error(reason);
+  // Запись в журнал уже сделана строкой выше. Без этой пометки слот прогона поймает
+  // ошибку и запишет её второй раз: в журнале каждая неудачная генерация двоилась,
+  // и половина раздела «Ошибки» состояла из пар-близнецов.
+  const failure = new Error(reason);
+  failure.captured = true;
+  throw failure;
 }
 
 /** Следующий материал в очереди → пост. Используется кнопкой в панели и cron'ом (этап 9). */

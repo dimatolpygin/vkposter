@@ -34,6 +34,21 @@ export function isConfigured() {
   return Boolean(config.openrouter.apiKey);
 }
 
+/**
+ * Отказ модели по фильтру контента: ответ есть, но писать текст она не стала.
+ * Формулировки у провайдеров разные, статус один — 400.
+ */
+const FILTER_MARKERS = [
+  'prohibited_content', 'blocked the request', 'safety', 'content_filter',
+  'content policy', 'responsibleaipolicy',
+];
+
+function blockedByFilter(status, detail) {
+  if (status !== 400 || !detail) return false;
+  const value = String(detail).toLowerCase();
+  return FILTER_MARKERS.some((marker) => value.includes(marker));
+}
+
 /** Модели по порядку: основная, затем фолбэк. Фолбэк можно отключить, оставив пустым. */
 export function modelChain() {
   return [config.openrouter.model, config.openrouter.fallbackModel].filter(Boolean);
@@ -97,6 +112,24 @@ export async function chat({
     // Тело ошибки провайдера информативнее статуса: там причина отказа модели.
     if (error instanceof HttpError) {
       const detail = parseErrorBody(error.body);
+
+      // Фильтр контента у модели. Список `models` тут не спасает: OpenRouter переключает
+      // на следующую модель при отказе провайдера, а это 400 на самом запросе — ответ
+      // пришёл, просто отрицательный. Тематика проекта (мошенничество, разоблачения)
+      // для Gemini пограничная, и такой отказ прилетает регулярно. Повторяем тем же
+      // запросом на резервной модели: она подобные темы обычно берёт.
+      const rest = models.slice(1);
+      if (blockedByFilter(error.status, detail) && rest.length > 0) {
+        logger.warn(
+          { модель: models[0], резерв: rest[0], причина: detail },
+          `Модель отказалась писать по фильтру контента — повтор на ${rest[0]}`,
+        );
+        return chat({
+          messages, schema, schemaName, models: rest,
+          temperature, maxTokens, serviceTier, sessionId, retries,
+        });
+      }
+
       throw new OpenRouterError(
         `OpenRouter ${error.status}: ${detail ?? 'без описания'}`,
         { code: error.status, cause: error },

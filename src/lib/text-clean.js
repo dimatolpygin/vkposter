@@ -223,6 +223,23 @@ export function validatePost(text, { minChars, maxChars, adLink, topicName }) {
  * нечего. Если после чистки значимых слов не осталось — проверку не применяем:
  * брак поста из-за мусорного названия темы был бы наказанием не за то.
  */
+/**
+ * Основа слова: слово без двух последних букв, но не короче четырёх.
+ *
+ * Русские названия склоняются, а проверка искала точное вхождение. Тема «Ксения
+ * Зюзгина» при совершенно нормальном тексте «Ксении Зюзгиной» проваливала проверку
+ * три раза подряд, и пост уходил в брак — в журнале это выглядело ежедневной ошибкой.
+ * Отсечение хвоста ловит любой падеж («зюзгин» есть и в «Зюзгиной», и в «Зюзгину»),
+ * а порог в четыре символа держит ложные совпадения на приемлемом уровне: проверка
+ * и так подтверждает лишь то, что название вообще упомянуто.
+ */
+function stem(word) {
+  // Длинное название из адреса («playfortunage8d959») в тексте живёт коротким именем
+  // («PlayFortune»): хвост из служебных символов дописан площадкой, а не проектом.
+  if (word.length >= 8) return word.slice(0, 6);
+  return word.length > 5 ? word.slice(0, word.length - 2) : word;
+}
+
 function mentionsProject(paragraph, topicName) {
   const haystack = paragraph.replace(/[^\p{L}\p{N}]+/gu, '').toLowerCase();
   const { words, folded } = projectTokens(topicName);
@@ -236,9 +253,9 @@ function mentionsProject(paragraph, topicName) {
   const haystackFolded = foldLatin(haystack);
   if (words.some((word, index) => {
     const value = word.toLowerCase();
-    if (value.length >= 4 && haystack.includes(value)) return true;
+    if (value.length >= 4 && haystack.includes(stem(value))) return true;
     const key = folded[index];
-    return key.length >= 4 && haystackFolded.includes(key);
+    return key.length >= 4 && haystackFolded.includes(stem(key));
   })) return true;
 
   // Короткие названия. Порог в четыре символа взят против ложных совпадений: обрывок
