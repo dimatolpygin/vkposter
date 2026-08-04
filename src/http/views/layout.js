@@ -57,13 +57,22 @@ const STYLES = `
   h2 { margin: 26px 0 10px; font-size: 17px; }
   .sub { color: var(--muted); margin: 0 0 22px; }
   .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
-          padding: 18px 20px; margin-bottom: 18px; }
+          padding: 18px 20px; margin-bottom: 18px;
+          /* Таблица с длинными адресами шире карточки: без прокрутки последняя колонка
+             («Состояние» в списке материалов) вылезала за правую границу. */
+          overflow-x: auto; }
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; }
   .stat .n { font-size: 26px; font-weight: 600; }
   .stat .l { color: var(--muted); font-size: 13px; }
   table { width: 100%; border-collapse: collapse; font-size: 14px; }
   th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line);
-           vertical-align: top; }
+           vertical-align: top;
+           /* Адрес статьи — одно длинное «слово» без пробелов, и именно он задавал
+              минимальную ширину таблицы. Переносим по любому месту. */
+           overflow-wrap: anywhere; }
+  /* Колонки, которые незачем сужать: дата и состояние переносились по букве,
+     хотя места им нужно немного. */
+  td .tag, td.nowrap, th.nowrap { white-space: nowrap; }
   th { color: var(--muted); font-weight: 500; font-size: 13px; }
   tr:last-child td { border-bottom: none; }
   code { background: var(--bg); padding: 1px 5px; border-radius: 4px; font-size: 13px; }
