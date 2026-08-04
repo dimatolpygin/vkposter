@@ -140,6 +140,20 @@ export async function chat({
   const latencyMs = Date.now() - startedAt;
 
   if (json?.error) {
+    // Отказ по фильтру приходит именно так: HTTP 200, а внутри тела код 400 с текстом
+    // «Gemini blocked the request». Проверено на проде — обработка только HTTP-ошибки
+    // этот случай не ловила, и слот прогона падал.
+    const rest = models.slice(1);
+    if (blockedByFilter(json.error.code, json.error.message) && rest.length > 0) {
+      logger.warn(
+        { модель: models[0], резерв: rest[0], причина: json.error.message },
+        `Модель отказалась писать по фильтру контента — повтор на ${rest[0]}`,
+      );
+      return chat({
+        messages, schema, schemaName, models: rest,
+        temperature, maxTokens, serviceTier, sessionId, retries,
+      });
+    }
     throw new OpenRouterError(`OpenRouter ${json.error.code}: ${json.error.message}`, {
       code: json.error.code,
     });
