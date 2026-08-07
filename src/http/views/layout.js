@@ -52,7 +52,9 @@ const STYLES = `
                        color: var(--accent); font-weight: 500; }
   aside .foot { margin-top: 22px; padding: 14px 18px 0; border-top: 1px solid var(--line);
                 font-size: 13px; color: var(--muted); }
-  main { flex: 1; padding: 26px 30px; max-width: 1100px; }
+  /* 1280, а не 1100: в «Источниках» девять колонок, и на прежней ширине последняя
+     (кнопки) уезжала под правый край карточки. */
+  main { flex: 1; padding: 26px 30px; max-width: 1280px; }
   h1 { margin: 0 0 4px; font-size: 22px; }
   h2 { margin: 26px 0 10px; font-size: 17px; }
   .sub { color: var(--muted); margin: 0 0 22px; }
@@ -75,8 +77,10 @@ const STYLES = `
   /* Длинный адрес — единственное, что действительно нужно рвать по любому месту:
      иначе он один задаёт ширину таблицы и выталкивает её за границу карточки. */
   td a, td code { overflow-wrap: anywhere; }
-  /* Заголовки и короткие пометки не переносим: места им нужно немного. */
-  th, td .tag, td.nowrap { white-space: nowrap; }
+  /* Короткие пометки не переносим: места им нужно немного, а по букве они
+     разваливались особенно заметно. Заголовки переносить можно — в широких
+     таблицах («Источники» — девять колонок) они и держат лишнюю ширину. */
+  td .tag, td.nowrap, th.nowrap { white-space: nowrap; }
   th { color: var(--muted); font-weight: 500; font-size: 13px; }
   tr:last-child td { border-bottom: none; }
   code { background: var(--bg); padding: 1px 5px; border-radius: 4px; font-size: 13px; }

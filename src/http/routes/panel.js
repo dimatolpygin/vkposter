@@ -144,7 +144,7 @@ export function panelRouter() {
             <td class="hint">${esc(formatDate(item.last_checked_at) || 'ни разу')}</td>
             <td>${item.is_active ? '<span class="tag on">включён</span>' : '<span class="tag off">выключен</span>'}
                 <br>${priorityForm(item)}</td>
-            <td style="white-space:nowrap">
+            <td style="display:flex;gap:6px;flex-wrap:wrap">
               <form class="inline" method="post" action="/sources/${item.id}/check">
                 <button class="small" type="submit"${item.is_active ? '' : ' disabled'}>Проверить</button>
               </form>
