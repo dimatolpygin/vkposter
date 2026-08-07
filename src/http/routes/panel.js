@@ -142,7 +142,8 @@ export function panelRouter() {
               st.topic_duplicates ? ` <span class="hint">дублей ${st.topic_duplicates}</span>` : ''
             }${st.skipped ? ` <span class="hint">служебных ${st.skipped}</span>` : ''}</td>
             <td class="hint">${esc(formatDate(item.last_checked_at) || 'ни разу')}</td>
-            <td>${item.is_active ? '<span class="tag on">включён</span>' : '<span class="tag off">выключен</span>'}</td>
+            <td>${item.is_active ? '<span class="tag on">включён</span>' : '<span class="tag off">выключен</span>'}
+                <br>${priorityForm(item)}</td>
             <td style="white-space:nowrap">
               <form class="inline" method="post" action="/sources/${item.id}/check">
                 <button class="small" type="submit"${item.is_active ? '' : ' disabled'}>Проверить</button>
@@ -312,6 +313,26 @@ export function panelRouter() {
         `Источник ${source.code} ${!source.is_active ? 'включён' : 'выключен'}`,
       );
       res.redirect('/sources?ok=1');
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  // Очередь источника: меньше число — раньше берём его темы
+  router.post('/sources/:id/priority', async (req, res, next) => {
+    try {
+      const source = await sources.findById(Number.parseInt(req.params.id, 10));
+      if (!source) return res.status(404).json({ error: 'Источник не найден' });
+      const value = Number.parseInt(req.body.priority, 10);
+      if (!Number.isFinite(value) || value < 0 || value > 999) {
+        return res.redirect('/sources?err=' + encodeURIComponent('Очередь задаётся числом от 0 до 999'));
+      }
+      await sources.setPriority(source.id, value);
+      logger.info(
+        { источник: source.code, очередь: value, кто: req.user.login },
+        `Очередь источника ${source.code}: ${value}`,
+      );
+      res.redirect('/sources?ok=' + encodeURIComponent(`Очередь источника ${source.code} обновлена`));
     } catch (error) {
       next(error);
     }
@@ -2474,6 +2495,29 @@ function statusTag(item) {
     return `<span class="tag on">текст есть</span> <span class="hint">${item.text_len} симв.</span>`;
   }
   return '<span class="tag off">ждёт извлечения</span>';
+}
+
+/**
+ * Очередь источника прямо в списке: меньше число — раньше берём его темы.
+ * Три готовых значения вместо числового поля: клиенту нужно «этот последним»,
+ * а не тонкая раскладка, при этом в базе лежит число и промежуточные значения
+ * при необходимости выставляются руками.
+ */
+function priorityForm(item) {
+  const current = Number(item.priority ?? 100);
+  const options = [
+    [10, 'берём первым'],
+    [100, 'обычная очередь'],
+    [900, 'берём последним'],
+  ]
+    .map(([value, label]) =>
+      `<option value="${value}"${value === current ? ' selected' : ''}>${label}</option>`)
+    .join('');
+  return `<form class="inline" method="post" action="/sources/${item.id}/priority">
+    <select name="priority" onchange="this.form.submit()"
+            style="width:auto;padding:2px 6px;font-size:12px">${options}</select>
+    <noscript><button class="ghost small" type="submit">ОК</button></noscript>
+  </form>`;
 }
 
 function buildSourceMessage(q) {

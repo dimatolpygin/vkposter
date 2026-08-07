@@ -67,12 +67,16 @@ const STYLES = `
   table { width: 100%; border-collapse: collapse; font-size: 14px; }
   th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line);
            vertical-align: top;
-           /* Адрес статьи — одно длинное «слово» без пробелов, и именно он задавал
-              минимальную ширину таблицы. Переносим по любому месту. */
-           overflow-wrap: anywhere; }
-  /* Колонки, которые незачем сужать: дата и состояние переносились по букве,
-     хотя места им нужно немного. */
-  td .tag, td.nowrap, th.nowrap { white-space: nowrap; }
+           /* break-word, а НЕ anywhere: anywhere учитывается при расчёте минимальной
+              ширины колонки: браузер решал, что любая ячейка может ужаться до одной
+              буквы, и раскладывал таблицу лесенкой («cry ptor ussi a»). break-word рвёт
+              слово только тогда, когда оно физически не влезает в уже отданную ширину. */
+           overflow-wrap: break-word; }
+  /* Длинный адрес — единственное, что действительно нужно рвать по любому месту:
+     иначе он один задаёт ширину таблицы и выталкивает её за границу карточки. */
+  td a, td code { overflow-wrap: anywhere; }
+  /* Заголовки и короткие пометки не переносим: места им нужно немного. */
+  th, td .tag, td.nowrap { white-space: nowrap; }
   th { color: var(--muted); font-weight: 500; font-size: 13px; }
   tr:last-child td { border-bottom: none; }
   code { background: var(--bg); padding: 1px 5px; border-radius: 4px; font-size: 13px; }

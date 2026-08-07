@@ -193,7 +193,7 @@ export async function nextArticleForGeneration(sourceId = null) {
         AND NOT EXISTS (SELECT 1 FROM posts p WHERE p.topic_key = a.topic_key AND p.status <> 'failed')
         AND (s.content_mode = 'topic_only' OR a.content IS NOT NULL)
         AND ($1::int IS NULL OR a.source_id = $1)
-      ORDER BY COALESCE(a.published_at, a.lastmod) DESC NULLS LAST
+      ORDER BY s.priority ASC, COALESCE(a.published_at, a.lastmod) DESC NULLS LAST
       LIMIT 1`,
     [sourceId ?? null],
   );
@@ -236,7 +236,8 @@ export async function listReadyPosts(limit, excludeArticleIds = []) {
   const { rows } = await query(
     `SELECT p.id, p.title, p.article_id, p.image_url, p.topic_key,
             COALESCE(a.published_at, a.lastmod) AS article_date,
-            a.topic_name, s.code AS source_code
+            a.topic_name, s.code AS source_code,
+            COALESCE(s.priority, 100) AS source_priority
        FROM posts p
        LEFT JOIN articles a ON a.id = p.article_id
        LEFT JOIN sources s ON s.id = a.source_id
@@ -245,20 +246,27 @@ export async function listReadyPosts(limit, excludeArticleIds = []) {
                          WHERE pub.post_id = p.id AND pub.error IS NULL
                            AND pub.pmp_publication_id IS NOT NULL)
         AND (p.article_id IS NULL OR NOT (p.article_id = ANY($2::bigint[])))
-      ORDER BY COALESCE(a.published_at, a.lastmod) DESC NULLS LAST, p.id ASC
+      ORDER BY COALESCE(s.priority, 100) ASC,
+               COALESCE(a.published_at, a.lastmod) DESC NULLS LAST, p.id ASC
       LIMIT $1`,
     [limit, excludeArticleIds],
   );
   return rows;
 }
 
-/** Материалы под генерацию, от свежих к старым. Тот же фильтр, что у `nextArticleForGeneration`. */
+/**
+ * Материалы под генерацию. Тот же фильтр, что у `nextArticleForGeneration`.
+ *
+ * Порядок: сначала очередь источника (`sources.priority`), внутри неё — от свежих
+ * к старым. Приоритет стоит перед датой намеренно: у источника, отодвинутого в конец,
+ * свежее почти всегда новее, и общая сортировка по дате снова отдавала бы план ему.
+ */
 export async function listArticlesForGeneration(limit, excludeArticleIds = []) {
   const { rows } = await query(
     `SELECT a.id, a.url, a.title, a.content, a.topic_key, a.topic_name,
             COALESCE(a.published_at, a.lastmod) AS published_at,
             COALESCE(a.published_at, a.lastmod) AS article_date,
-            s.code AS source_code, s.content_mode
+            s.code AS source_code, s.content_mode, s.priority AS source_priority
        FROM articles a
        JOIN sources s ON s.id = a.source_id
       WHERE a.status IN ('new', 'fetched')
@@ -266,7 +274,7 @@ export async function listArticlesForGeneration(limit, excludeArticleIds = []) {
         AND NOT EXISTS (SELECT 1 FROM posts p WHERE p.topic_key = a.topic_key AND p.status <> 'failed')
         AND (s.content_mode = 'topic_only' OR a.content IS NOT NULL)
         AND NOT (a.id = ANY($2::bigint[]))
-      ORDER BY COALESCE(a.published_at, a.lastmod) DESC NULLS LAST, a.id DESC
+      ORDER BY s.priority ASC, COALESCE(a.published_at, a.lastmod) DESC NULLS LAST, a.id DESC
       LIMIT $1`,
     [limit, excludeArticleIds],
   );

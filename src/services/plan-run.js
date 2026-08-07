@@ -15,9 +15,10 @@ const logger = log('план');
  * 1. **Один материал — одна группа.** Пересечений внутри прогона нет: раздача идёт
  *    по кругу из общего списка кандидатов, каждый берётся ровно один раз. Дополнительно
  *    это закрыто уникальным индексом `run_items (run_id, article_id)`.
- * 2. **От свежих к старым.** Кандидаты (готовые посты и материалы под генерацию)
- *    сливаются в один список и сортируются по дате материала; раздача по кругу
- *    сохраняет этот порядок внутри каждой группы.
+ * 2. **Сначала очередь источника, внутри неё — от свежих к старым.** Кандидаты (готовые
+ *    посты и материалы под генерацию) сливаются в один список и сортируются по
+ *    `sources.priority`, затем по дате материала; раздача по кругу сохраняет этот
+ *    порядок внутри каждой группы.
  * 3. **Объём задаёт группа.** Квота = `posts_per_day` минус уже опубликованное сегодня.
  * 4. **Время разносится по слотам** внутри окна постинга с джиттером: подряд идущие
  *    посты в одну минуту выглядят как бот.
@@ -75,6 +76,7 @@ export async function buildPlan({ now = new Date(), groupIds, limitPerGroup, ste
       articleId: row.article_id ? Number(row.article_id) : null,
       date: row.article_date,
       label: row.title,
+      priority: Number(row.source_priority ?? 100),
       needsImage: !row.image_url,
     })),
     ...fresh.map((row) => ({
@@ -83,6 +85,7 @@ export async function buildPlan({ now = new Date(), groupIds, limitPerGroup, ste
       articleId: Number(row.id),
       date: row.article_date,
       label: row.topic_name ?? row.title ?? row.url,
+      priority: Number(row.source_priority ?? 100),
       needsImage: true,
     })),
   ].sort((a, b) => {
@@ -92,6 +95,10 @@ export async function buildPlan({ now = new Date(), groupIds, limitPerGroup, ste
     // сегодняшними темами и мог не опубликоваться никогда — а именно так выглядит
     // очередь после дня, когда на обложки не хватило кредитов.
     if (a.kind !== b.kind) return a.kind === 'post' ? -1 : 1;
+    // Очередь источника (`sources.priority`) сильнее даты. Иначе сайт, отодвинутый
+    // клиентом в конец, всё равно забирал бы план: он публикует чаще остальных,
+    // и его материалы почти всегда свежее.
+    if (a.priority !== b.priority) return a.priority - b.priority;
     return dateValue(b.date) - dateValue(a.date);
   });
 
