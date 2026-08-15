@@ -28,6 +28,27 @@ const logger = log('сбор-материала');
  *    клиент должен иметь возможность проверить — в карточке материала видно, откуда.
  */
 
+/**
+ * Пауза после сбоя поиска.
+ *
+ * Сбой у поиска не бывает единичным: кончились кредиты firecrawl — они кончились
+ * для всех слотов прогона, а не для одного. Без паузы каждый следующий слот повторял
+ * тот же запрос: на кредитах это шесть десятков одинаковых записей в журнале, а на
+ * зависании — по три минуты ожидания на слот, то есть прогон растягивался на часы.
+ * После сбоя поиск отключается на время: пост пишется по теме, публикации идут дальше.
+ */
+const PAUSE_AFTER_LIMIT_MS = 6 * 60 * 60 * 1000;
+const PAUSE_AFTER_FAILURE_MS = 30 * 60 * 1000;
+
+let pausedUntil = 0;
+let pauseReason = '';
+
+/** Для тестов и ручного запуска из панели: снять паузу поиска. */
+export function resumeResearch() {
+  pausedUntil = 0;
+  pauseReason = '';
+}
+
 /** Сколько символов собранного материала уходит в промт целиком. */
 const MAX_TOTAL_CHARS = 12_000;
 
@@ -58,6 +79,13 @@ export async function collectMaterial(article, { force = false } = {}) {
   if (!force && !shouldResearch(article, mode)) return null;
   if (!firecrawl.isConfigured()) {
     logger.warn('FIRECRAWL_API_KEY не задан — поиск материала пропущен');
+    return null;
+  }
+  if (!force && Date.now() < pausedUntil) {
+    logger.info(
+      { материал: article.id, до: new Date(pausedUntil).toLocaleString('ru-RU') },
+      `Поиск материала на паузе (${pauseReason}) — пост будет написан по теме`,
+    );
     return null;
   }
 
@@ -105,6 +133,17 @@ export async function collectMaterial(article, { force = false } = {}) {
     );
     return { text, urls, pages: pages.length };
   } catch (error) {
+    // Кредиты кончились или запрос завис — остальные слоты упрутся в то же самое.
+    const outOfCredits = error.code === 402 || /insufficient credits/i.test(error.message ?? '');
+    const stuck = error.timedOut === true || /таймаут/i.test(error.message ?? '');
+    if (outOfCredits || stuck) {
+      pausedUntil = Date.now() + (outOfCredits ? PAUSE_AFTER_LIMIT_MS : PAUSE_AFTER_FAILURE_MS);
+      pauseReason = outOfCredits ? 'кончились кредиты firecrawl' : 'поиск не отвечает';
+      logger.warn(
+        { до: new Date(pausedUntil).toLocaleString('ru-RU'), причина: pauseReason },
+        `Поиск материала отключён до ${new Date(pausedUntil).toLocaleString('ru-RU')}: ${pauseReason}`,
+      );
+    }
     logger.error(
       { материал: article.id, запрос: query, ...errFields(error) },
       `Сбор материала по «${project}» не удался — пост будет написан по теме`,

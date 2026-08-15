@@ -28,6 +28,23 @@ function fillPrompt(template, { topic, title }) {
   return `${filled}\n\nТема обложки: ${topic}`;
 }
 
+/**
+ * Отказ генератора картинок по контент-политике: задача создана, но модель отказалась
+ * рисовать. Тема проекта («развод», «мошенники», имя человека в заголовке) для
+ * OpenAI пограничная, и такой отказ прилетает почти ежедневно — 10, 11, 12, 13 и
+ * 14 августа подряд. Слот при этом падал целиком, и готовый оплаченный текст оставался
+ * без обложки до следующего прогона.
+ */
+const POLICY_MARKERS = ['content polic', 'violate', 'policy violation', 'safety'];
+
+function blockedByPolicy(error) {
+  const text = String(error?.message ?? '').toLowerCase();
+  return POLICY_MARKERS.some((marker) => text.includes(marker));
+}
+
+/** Нейтральная тема для повтора: без имён и обвинений, но по смыслу та же обложка. */
+const NEUTRAL_TOPIC = 'обзор сомнительного интернет-проекта, деловая иллюстрация без текста';
+
 function topicOf(post) {
   return post.topic_name || post.title || post.topic_key || 'обзор проекта';
 }
@@ -71,14 +88,29 @@ export async function generateImageForPost(post) {
       );
       result = await kie.waitForTask(post.image_task_id, { pollMs, waitMs });
     } else {
-      result = await kie.generateImage({
-        prompt: text,
+      const start = (value) => kie.generateImage({
+        prompt: value,
         aspectRatio,
         resolution,
         pollMs,
         waitMs,
         onTask: (taskId) => posts.setImageTask(post.id, taskId, prompt.version),
       });
+
+      try {
+        result = await start(text);
+      } catch (error) {
+        // Отказ по контент-политике: повторяем один раз с обезличенной темой. Пост
+        // и текст уже оплачены, а разница на картинке — только в том, что на ней нет
+        // имени проекта. Терять из-за этого весь слот незачем.
+        if (!blockedByPolicy(error)) throw error;
+        const neutral = fillPrompt(prompt.body, { topic: NEUTRAL_TOPIC, title: NEUTRAL_TOPIC });
+        logger.warn(
+          { пост: post.id, тема: topic, причина: error.message },
+          `Генератор картинок отказал по контент-политике — повтор на обезличенной теме`,
+        );
+        result = await start(neutral);
+      }
     }
 
     const file = await kie.downloadImage(result.urls[0]);

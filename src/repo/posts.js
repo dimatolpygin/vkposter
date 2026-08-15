@@ -29,15 +29,23 @@ export async function create(row) {
   return rows[0];
 }
 
+/**
+ * Забракованный пост. Текст последней попытки сохраняем: без него разбор жалобы
+ * «каждый день одна и та же ошибка» упирается в то, что смотреть не на что —
+ * причина брака известна словами, а сам текст потерян.
+ */
 export async function createFailed(row) {
+  const body = String(row.body ?? '');
   const { rows } = await query(
     `INSERT INTO posts (article_id, title, body, char_count, model, prompt_version, attempts,
                         topic_key, request_id, status, error)
-     VALUES ($1, $2, '', 0, $3, $4, $5, $6, $7, 'failed', $8)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'failed', $10)
      RETURNING *`,
     [
       row.articleId ?? null,
       row.title ?? '(не сгенерирован)',
+      body,
+      body.length,
       row.model ?? null,
       row.promptVersion ?? null,
       row.attempts ?? 1,
@@ -47,6 +55,15 @@ export async function createFailed(row) {
     ],
   );
   return rows[0];
+}
+
+/** Сколько раз генерация по этому материалу уже уходила в брак. */
+export async function countFailedByArticle(articleId) {
+  const { rows } = await query(
+    `SELECT count(*)::int AS count FROM posts WHERE article_id = $1 AND status = 'failed'`,
+    [articleId],
+  );
+  return rows[0].count;
 }
 
 export async function findById(id) {

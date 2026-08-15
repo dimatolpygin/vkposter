@@ -4,12 +4,16 @@ import { projectDisplayName } from '../lib/topic.js';
 import { collectMaterial } from './research.js';
 import * as prompts from '../repo/prompts.js';
 import * as posts from '../repo/posts.js';
+import * as articles from '../repo/articles.js';
 import * as settings from '../repo/settings.js';
 import { captureError } from './capture-error.js';
 import { log, errFields } from '../logger.js';
 import { getRequestId } from '../context.js';
 
 const logger = log('генерация');
+
+/** Сколько полных провалов генерации терпит один материал, прежде чем уйти из очереди. */
+const GIVE_UP_AFTER = 2;
 
 /**
  * Схема ответа модели. В коде живёт только каркас — сам промт целиком в БД и правится
@@ -490,6 +494,8 @@ export async function generatePost(article, { interactive = false } = {}) {
   const failed = await posts.createFailed({
     articleId: article.id,
     title: article.topic_name ?? article.title,
+    // Текст последней попытки — чтобы брак можно было посмотреть глазами, а не гадать.
+    body: lastBody,
     model: lastResult?.model ?? openrouter.modelChain()[0],
     promptVersion: prompt.version,
     attempts: maxAttempts,
@@ -498,6 +504,23 @@ export async function generatePost(article, { interactive = false } = {}) {
     error: reason,
   });
   logger.error({ материал: article.id, пост: failed.id, причина: reason }, `Генерация поста провалилась: ${reason}`);
+
+  // Материал, который бракуется раз за разом, снимается с очереди.
+  //
+  // Забракованный пост тему не занимает (в очередь материал берётся, пока по нему нет
+  // поста со статусом кроме failed), поэтому один неудачный материал возвращался каждый
+  // день: жёг по три генерации, забирал слот у нормальной темы и каждый день клал
+  // в журнал одну и ту же ошибку. Так материал «Mailbox Quarantine Alert» падал
+  // 13, 14 и 15 августа подряд. После второго полного провала признаём его негодным:
+  // он уходит в «Отклонённые материалы» с причиной, а слот достаётся другой теме.
+  const failedBefore = await posts.countFailedByArticle(article.id);
+  if (failedBefore >= GIVE_UP_AFTER) {
+    await articles.markFailed(article.id, `текст не прошёл проверку ${failedBefore} раза: ${reason}`);
+    logger.warn(
+      { материал: article.id, провалов: failedBefore },
+      `Материал #${article.id} снят с очереди: ${failedBefore} провала генерации подряд`,
+    );
+  }
   // Записываем именно `lastError`, если он был: в нём тело ответа провайдера, а в `reason`
   // только текст. Когда провайдер отвечал нормально, а брак дала валидация, сервиса нет.
   await captureError('генерация текста', lastError ?? new Error(reason), {
