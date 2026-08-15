@@ -157,6 +157,37 @@ async function shrinkBody(body, { maxChars, temperature, serviceTier }) {
 }
 
 /**
+ * Ссылка рекламного блока из активного промта.
+ *
+ * Раньше ссылка жила отдельной настройкой `ad_link`, и это стоило клиенту дней работы:
+ * 11 августа он поменял в промте адрес сайта на приглашение в телеграм, настройка
+ * осталась прежней, и валидация браковала каждый пост с формулировкой «нет рекламного
+ * блока со ссылкой https://proverka-zarabotka.online» — при том что блок в тексте был.
+ * Правда о ссылке одна и лежит там же, где сам блок: в промте. Настройка остаётся
+ * запасным значением на случай, если в промте ссылки нет вовсе.
+ *
+ * Берём именно ссылку внутри блока между рядами дефисов: в остальном тексте промта
+ * могут стоять адреса-примеры, и принять их за рекламные нельзя.
+ */
+export function adLinkFromPrompt(promptBody) {
+  if (!promptBody) return null;
+  const lines = String(promptBody).split('\n');
+  const isSeparator = (line) => /^\s*-{4,}\s*$/.test(line);
+
+  let inside = false;
+  for (const line of lines) {
+    if (isSeparator(line)) { inside = !inside; continue; }
+    if (!inside) continue;
+    const found = line.match(/https?:\/\/[^\s)\]"'<>]+/);
+    // Хвостовой слэш и знаки препинания режем: в промте ссылка обычно записана
+    // markdown-ссылкой «[адрес](адрес/)», а в готовом посте остаётся голый адрес
+    // без слэша, и точное сравнение со слэшем не сошлось бы.
+    if (found) return found[0].replace(/[.,;:!?)\]]+$/, '').replace(/\/+$/, '');
+  }
+  return null;
+}
+
+/**
  * Рекламный блок клиента из активного промта: строки вокруг ссылки, ограниченные
  * рядами дефисов.
  *
@@ -167,20 +198,29 @@ async function shrinkBody(body, { maxChars, temperature, serviceTier }) {
 export function adBlockFromPrompt(promptBody, adLink) {
   if (!promptBody || !adLink) return null;
   const lines = String(promptBody).split('\n');
-  const at = lines.findIndex((line) => line.includes(adLink));
-  if (at === -1) return null;
-
   const isSeparator = (line) => /^\s*-{4,}\s*$/.test(line);
-  let from = at;
-  while (from > 0 && !isSeparator(lines[from - 1])) from -= 1;
-  let to = at;
-  while (to < lines.length - 1 && !isSeparator(lines[to + 1])) to += 1;
-  if (from === 0 || to === lines.length - 1) return null;
 
-  const block = ['--------', ...lines.slice(from, to + 1), '------'].join('\n');
-  // Через ту же чистку, что и текст поста: в промте ссылка записана markdown-ссылкой,
-  // а в посте она должна остаться голым адресом.
-  return cleanPostText(block);
+  // Ищем ссылку ТОЛЬКО внутри блока между рядами дефисов. Раньше бралось первое
+  // вхождение в промте — а клиент упоминает ссылку и выше по тексту («после краткого
+  // описания проекта добавляй рекламный блок: …»), поиск границ упирался в начало
+  // файла и функция возвращала null. Из-за этого страховка «дописать забытый блок»
+  // на живом промте не срабатывала ни разу.
+  let inside = false;
+  let from = -1;
+  for (let i = 0; i < lines.length; i += 1) {
+    if (isSeparator(lines[i])) {
+      if (!inside) { inside = true; from = i + 1; continue; }
+      inside = false;
+      const block = lines.slice(from, i);
+      if (block.some((line) => line.includes(adLink))) {
+        // Через ту же чистку, что и текст поста: в промте ссылка записана
+        // markdown-ссылкой, а в посте она должна остаться голым адресом.
+        return cleanPostText(['--------', ...block, '------'].join('\n'));
+      }
+      continue;
+    }
+  }
+  return null;
 }
 
 /**
@@ -237,7 +277,10 @@ export async function generatePost(article, { interactive = false } = {}) {
   const minChars = await settings.getInt('post_min_chars', 1200);
   const maxChars = await settings.getInt('post_max_chars', 2200);
   const maxAttempts = await settings.getInt('generation_attempts', 3);
-  const adLink = await settings.get('ad_link', 'https://proverka-zarabotka.online');
+  // Ссылка рекламного блока — из активного промта; настройка `ad_link` только запасная
+  // (см. adLinkFromPrompt: разъезд промта и настройки уже стоил клиенту дня публикаций).
+  const adLink = adLinkFromPrompt(prompt.body)
+    ?? (await settings.get('ad_link', 'https://proverka-zarabotka.online'));
   const temperature = Number(await settings.get('openrouter_temperature', '0.85'));
   const maxTokens = await settings.getInt('openrouter_max_tokens', 1800);
   // flex вдвое дешевле, но может ждать в очереди — для крона это нормально.
