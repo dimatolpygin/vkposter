@@ -25,6 +25,21 @@ const FATAL_STATUS = new Set([400, 401, 403, 404, 422]);
 
 /** chanel_id соцсети. В API опечатка — поле называется именно `chanel_id`. */
 export const CHANEL_VK = 2;
+export const CHANEL_OK = 5;
+
+/**
+ * Соцсети, в которые постим. Список — единственное место, где это задано: раздача
+ * материалов по группам, дневные лимиты, слоты и сама публикация про соцсеть ничего
+ * не знают и работают с любым аккаунтом postmypost. Новая сеть — строка здесь.
+ */
+export const NETWORKS = new Map([
+  [CHANEL_VK, { code: 'vk', title: 'ВКонтакте', short: 'ВК' }],
+  [CHANEL_OK, { code: 'ok', title: 'Одноклассники', short: 'ОК' }],
+]);
+
+export function networkOf(chanelId) {
+  return NETWORKS.get(Number(chanelId)) ?? { code: 'other', title: 'Другая сеть', short: '-' };
+}
 
 /** publication_status при создании: 4 — черновик, 5 — в очередь на реальную публикацию. */
 export const STATUS_DRAFT = 4;
@@ -116,9 +131,12 @@ export async function accounts() {
   return Array.isArray(parsed) ? parsed : [parsed].filter(Boolean);
 }
 
-/** Только группы ВК. Никогда не «первый аккаунт с chanel_id=2» — групп бывает несколько. */
-export async function vkAccounts() {
-  return (await accounts()).filter((item) => Number(item?.chanel_id) === CHANEL_VK);
+/**
+ * Аккаунты тех сетей, в которые мы постим. Никогда не «первый аккаунт с chanel_id=2» —
+ * групп бывает несколько, и работаем всегда с конкретным `id`.
+ */
+export async function postingAccounts() {
+  return (await accounts()).filter((item) => NETWORKS.has(Number(item?.chanel_id)));
 }
 
 /** Шаг 1: поставить картинку в очередь загрузки. Возвращает id задачи, НЕ file_id. */
@@ -248,14 +266,17 @@ export async function publication(publicationId) {
 }
 
 /**
- * Найти в ответе адрес поста ВКонтакте. Имя поля в справочнике не описано и у разных
- * соцсетей разное, поэтому ищем по самому адресу — он опознаётся однозначно
- * (`vk.com/wall-123_456`), а промахнуться мимо неизвестного поля так нельзя.
+ * Найти в ответе адрес опубликованной записи. Имя поля в справочнике не описано и у
+ * разных соцсетей разное, поэтому ищем по самому адресу: он опознаётся однозначно,
+ * а промахнуться мимо неизвестного поля так нельзя.
  */
-export function vkUrlFrom(payload) {
+export function postUrlFrom(payload) {
   if (!payload) return null;
   const text = typeof payload === 'string' ? payload : JSON.stringify(payload);
-  const match = text.match(/https?:\\?\/\\?\/(?:m\.)?vk\.com\/wall-?\d+_\d+/i);
+  // ВК: vk.com/wall-123_456. Одноклассники: ok.ru/group/123/topic/456.
+  const match = text.match(
+    /https?:\\?\/\\?\/(?:m\.)?(?:vk\.com\/wall-?\d+_\d+|ok\.ru\/(?:group\/)?\d+\/topic\/\d+)/i,
+  );
   if (!match) return null;
   return match[0].replaceAll('\\/', '/');
 }

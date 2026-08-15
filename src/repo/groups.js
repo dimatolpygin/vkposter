@@ -17,13 +17,14 @@ import { query } from '../db/pool.js';
 export async function upsertFromPmp(account, { postsPerDay } = {}) {
   const { rows } = await query(
     `INSERT INTO groups (pmp_account_id, name, login, external_id, connection_status,
-                         posts_per_day, synced_at)
-     VALUES ($1, $2, $3, $4, $5, COALESCE($6, 10), now())
+                         chanel_id, posts_per_day, synced_at)
+     VALUES ($1, $2, $3, $4, $5, COALESCE($6, 2), COALESCE($7, 10), now())
      ON CONFLICT (pmp_account_id) DO UPDATE
         SET name = EXCLUDED.name,
             login = EXCLUDED.login,
             external_id = EXCLUDED.external_id,
             connection_status = EXCLUDED.connection_status,
+            chanel_id = EXCLUDED.chanel_id,
             synced_at = now()
      RETURNING *, (xmax = 0) AS inserted`,
     [
@@ -32,6 +33,7 @@ export async function upsertFromPmp(account, { postsPerDay } = {}) {
       account.login ?? null,
       account.external_id ?? null,
       account.connection_status ?? null,
+      account.chanel_id ?? null,
       postsPerDay ?? null,
     ],
   );

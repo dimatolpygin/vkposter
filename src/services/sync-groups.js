@@ -18,7 +18,7 @@ const logger = log('группы');
  * кнопкой в разделе «Группы» — там видно, что она скрыта, а не потеряна.
  */
 export async function syncGroups() {
-  const accounts = await pmp.vkAccounts();
+  const accounts = await pmp.postingAccounts();
   const defaultPerDay = await settings.getInt('default_posts_per_day', 10);
 
   let added = 0;

@@ -142,7 +142,7 @@ export async function listForLog({ limit = 50, groupId, only } = {}) {
   params.push(limit);
 
   const { rows } = await query(
-    `SELECT p.*, g.name AS group_name, g.login AS group_login, g.external_id AS group_external_id,
+    `SELECT p.*, g.name AS group_name, g.login AS group_login, g.external_id AS group_external_id, g.chanel_id AS group_chanel_id,
             po.title AS post_title, po.topic_key, po.image_url, po.status AS post_status,
             a.topic_name, a.url AS article_url
        FROM publications p

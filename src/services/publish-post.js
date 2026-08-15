@@ -67,7 +67,7 @@ export async function publishPost(post, { groupIds, mode, postAt, ignoreDailyLim
 
   // Состояние подключения берём живым запросом, а не из БД: строка могла быть
   // синхронизирована неделю назад, а токен ВК истёк вчера.
-  const accounts = new Map((await pmp.vkAccounts()).map((item) => [String(item.id), item]));
+  const accounts = new Map((await pmp.postingAccounts()).map((item) => [String(item.id), item]));
 
   const when = postAt ?? Date.now() + delayMinutes * 60_000;
   const postAtIso = pmp.moscowIso(when);
@@ -117,7 +117,7 @@ export async function publishPost(post, { groupIds, mode, postAt, ignoreDailyLim
         throw new Error(
           `Аккаунт группы «${group.name}» отключён в postmypost ` +
             `(connection_status ${account.connection_status ?? '—'}). ` +
-            'Переподключите группу ВК в postmypost и повторите.',
+            'Переподключите группу в postmypost и повторите.',
         );
       }
       await groups.setConnectionStatus(group.id, account.connection_status);

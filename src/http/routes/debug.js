@@ -250,13 +250,15 @@ export function debugRouter() {
     const flags = pmpFlags(req);
     if (flags.includes('noaccounts')) return res.json([]);
     const connection = flags.includes('badaccount') ? 0 : 1;
-    // Третий аккаунт — Telegram: проверяем, что фильтр по chanel_id = 2 работает
-    // и в группы ВК не попадает канал.
+    // Четыре аккаунта: две группы ВК, одна Одноклассников (постим и туда) и Telegram —
+    // на нём проверяется, что сети вне списка NETWORKS в панель не попадают.
     return res.json([
       { id: 900001, chanel_id: 2, external_id: '-100001', name: 'Заглушка ВК первая',
         login: 'stub_vk_1', connection_status: connection },
       { id: 900002, chanel_id: 2, external_id: '-100002', name: 'Заглушка ВК вторая',
         login: 'stub_vk_2', connection_status: connection },
+      { id: 900004, chanel_id: 5, external_id: '70000000000001', name: 'Заглушка ОК',
+        login: null, connection_status: connection },
       { id: 900003, chanel_id: 6, external_id: '@stub', name: 'Заглушка Telegram',
         login: 'stub_tg', connection_status: 1 },
     ]);

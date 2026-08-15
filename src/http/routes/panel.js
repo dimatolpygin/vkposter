@@ -1176,7 +1176,7 @@ export function panelRouter() {
     }
   });
 
-  // ── Группы ВК ────────────────────────────────────────────────────────────
+  // ── Группы ────────────────────────────────────────────────────────────
   router.get('/groups', async (req, res, next) => {
     try {
       const list = await groups.listAll();
@@ -1197,10 +1197,11 @@ export function panelRouter() {
                 && Number(group.connection_status) !== pmp.CONNECTION_OK;
               const left = Math.max(0, group.posts_per_day - group.published_today);
               return `<tr>
-                <td><strong>${esc(group.name)}</strong><br>
-                    <span class="hint">${esc(group.login ?? '')} · аккаунт
+                <td><strong>${esc(group.name)}</strong>
+                    ${networkTag(group)}<br>
+                    <span class="hint">${group.login ? `${esc(group.login)} · ` : ''}аккаунт
                     ${group.pmp_account_id}${
-                      group.external_id ? ` · ВК ${esc(group.external_id)}` : ''
+                      group.external_id ? ` · ${esc(group.external_id)}` : ''
                     }</span></td>
                 <td>
                   <form class="inline" method="post" action="/groups/${group.id}/posts-per-day">
@@ -1234,7 +1235,7 @@ export function panelRouter() {
               </tr>`;
             })
             .join('\n')
-        : `<tr><td colspan="7" class="empty">Групп нет. Подключите группу ВК в postmypost
+        : `<tr><td colspan="7" class="empty">Групп нет. Подключите группу в postmypost
              и нажмите «Обновить список из postmypost».</td></tr>`;
 
       const removedBlock = removed.length
@@ -1285,7 +1286,7 @@ export function panelRouter() {
             </form>
           </div>
           <p class="hint" style="margin:10px 0 0">
-            Группы берутся из проекта postmypost (только ВК), числовые id вручную вводить
+            Группы берутся из проекта postmypost (ВКонтакте и Одноклассники), числовые id вводить
             не нужно: подключили группу там - нажали кнопку здесь. «Постов в день»
             ограничивает публикации в группу за сутки по МСК; выключенная группа посты
             не получает.
@@ -1295,10 +1296,10 @@ export function panelRouter() {
 
       res.type('html').send(
         page({
-          title: 'Группы ВК',
+          title: 'Группы',
           active: '/groups',
           user: req.user,
-          heading: 'Группы ВК',
+          heading: 'Группы',
           sub: 'Список приходит из postmypost. Клиент включает нужные группы и задаёт объём постинга.',
           message: buildSourceMessage(req.query),
           body,
@@ -1922,7 +1923,7 @@ export function panelRouter() {
       if (!row.pmp_publication_id) throw new Error('У этой записи нет id в postmypost');
 
       const payload = await pmp.publication(row.pmp_publication_id);
-      const url = pmp.vkUrlFrom(payload);
+      const url = pmp.postUrlFrom(payload);
       if (!url) {
         throw new Error(
           'postmypost не отдал адрес записи в ВК. Так бывает у черновика и у отложенного ' +
@@ -2620,12 +2621,24 @@ function vkLinkCell(item) {
   return `${wall ? `<a href="${esc(wall)}" target="_blank" rel="noopener">группа ↗</a> ` : ''}${refresh}`;
 }
 
-/** Адрес группы ВК: по короткому имени, а если его нет — по числовому id сообщества. */
+/**
+ * Адрес сообщества: по короткому имени, а если его нет — по числовому id.
+ * У ВК это vk.com/club<id> (минус в id сообщества отбрасывается), у Одноклассников
+ * ok.ru/group/<id>.
+ */
 function groupWallUrl(item) {
-  if (item.group_login) return `https://vk.com/${item.group_login}`;
+  const ok = Number(item.group_chanel_id) === pmp.CHANEL_OK;
+  if (item.group_login) return `https://${ok ? 'ok.ru' : 'vk.com'}/${item.group_login}`;
   const external = String(item.group_external_id ?? '').trim();
-  if (/^-?\d+$/.test(external)) return `https://vk.com/club${external.replace('-', '')}`;
-  return null;
+  if (!/^-?\d+$/.test(external)) return null;
+  const digits = external.replace('-', '');
+  return ok ? `https://ok.ru/group/${digits}` : `https://vk.com/club${digits}`;
+}
+
+/** Метка соцсети рядом с названием группы. */
+function networkTag(group) {
+  const net = pmp.networkOf(group.chanel_id);
+  return `<span class="tag ${net.code === 'ok' ? 'soon' : 'off'}">${esc(net.title)}</span>`;
 }
 
 /** Только дата: у периода наполнения времени нет, и «00:00:00» в нём выглядит мусором. */
