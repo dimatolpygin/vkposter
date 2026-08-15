@@ -66,7 +66,7 @@ export function panelRouter() {
       const body = `
         <div class="grid">
           ${stat(`${s.sources_active} из ${s.sources_total}`, 'Источников активно')}
-          ${stat(s.groups_active, 'Групп ВК активно')}
+          ${stat(s.groups_active, 'Групп активно')}
           ${stat(s.articles, 'Материалов найдено')}
           ${stat(s.topics, 'Уникальных тем')}
           ${stat(s.posts, 'Постов сгенерировано')}
@@ -1009,7 +1009,7 @@ export function panelRouter() {
     }
   });
 
-  // Синхронизация групп ВК из postmypost. Кнопка есть и в разделе «Группы»,
+  // Синхронизация групп из postmypost. Кнопка есть и в разделе «Группы»,
   // и в форме публикации — поле back говорит, куда вернуться.
   router.post('/groups/sync', async (req, res) => {
     const back = typeof req.body.back === 'string' && req.body.back.startsWith('/')
@@ -1017,7 +1017,7 @@ export function panelRouter() {
       : '/groups';
     try {
       const result = await syncGroups();
-      const summary = `Групп ВК из postmypost: ${result.total} (новых ${result.added}` +
+      const summary = `Групп в postmypost: ${result.total} (новых ${result.added}` +
         (result.broken ? `, отвалившихся ${result.broken}` : '') +
         (result.hidden ? `, скрытых ${result.hidden}` : '') + ')';
       res.redirect(`${back}?ok=${encodeURIComponent(summary)}`);
@@ -1148,7 +1148,7 @@ export function panelRouter() {
           </form>
         </div>
         <div class="card">
-          <h2 style="margin-top:0">Публикация в ВК</h2>
+          <h2 style="margin-top:0">Публикация</h2>
           ${await publicationsTable(post.id)}
           ${post.image_url
             ? await publishForm(post, Number.parseInt(req.query.group, 10))
@@ -1886,7 +1886,7 @@ export function panelRouter() {
             <tbody>${rows}</tbody>
           </table>
           <p class="hint" style="margin:12px 0 0">
-            Ссылка на запись в ВК появляется только у реальной публикации: у черновика
+            Ссылка на запись появляется только у реальной публикации: у черновика
             записи на стене ещё нет, поэтому ссылка ведёт на саму группу. Кнопка
             «Найти ссылку» перечитывает публикацию в postmypost - ей есть смысл
             пользоваться после того, как отложенный пост вышел.
@@ -1910,7 +1910,7 @@ export function panelRouter() {
   });
 
   /**
-   * Подтянуть ссылку на запись в ВК из postmypost. Отдельной кнопкой, а не при
+   * Подтянуть ссылку на запись из postmypost. Отдельной кнопкой, а не при
    * публикации: в момент создания записи на стене ещё нет — ни у черновика,
    * ни у отложенного поста.
    */
@@ -1926,14 +1926,14 @@ export function panelRouter() {
       const url = pmp.postUrlFrom(payload);
       if (!url) {
         throw new Error(
-          'postmypost не отдал адрес записи в ВК. Так бывает у черновика и у отложенного ' +
+          'postmypost не отдал адрес записи. Так бывает у черновика и у отложенного ' +
             'поста, который ещё не вышел: записи на стене пока не существует.',
         );
       }
       await publications.setVkUrl(id, url);
       res.redirect(`${back}?ok=${encodeURIComponent(`Ссылка найдена: ${url}`)}`);
     } catch (error) {
-      logger.error(errFields(error), 'Поиск ссылки на пост в ВК не удался');
+      logger.error(errFields(error), 'Поиск ссылки на пост не удался');
       res.redirect(`${back}?err=${encodeURIComponent(error.message)}`);
     }
   });
@@ -2087,7 +2087,7 @@ export function panelRouter() {
 
     if (list.length === 0) {
       return `<p class="hint" style="margin:0 0 10px">
-          Групп в базе нет. Список берётся из postmypost: подключите группу ВК там
+          Групп в базе нет. Список берётся из postmypost: подключите группу там
           и нажмите кнопку ниже.</p>
         ${syncButton}`;
     }
@@ -2609,7 +2609,7 @@ function errorContext(item) {
  */
 function vkLinkCell(item) {
   if (item.vk_url) {
-    return `<a href="${esc(item.vk_url)}" target="_blank" rel="noopener">пост в ВК ↗</a>`;
+    return `<a href="${esc(item.vk_url)}" target="_blank" rel="noopener">пост ↗</a>`;
   }
   const wall = groupWallUrl(item);
   const refresh = item.pmp_publication_id

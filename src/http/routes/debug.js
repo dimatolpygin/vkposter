@@ -229,7 +229,7 @@ export function debugRouter() {
    *
    * Режим задаётся сегментом пути (клиент дописывает `/upload/init` к baseUrl):
    *   .../_debug/pmp/badaccount/...  аккаунты отдают connection_status 0 (отвалились)
-   *   .../_debug/pmp/noaccounts/...  групп ВК в проекте нет
+   *   .../_debug/pmp/noaccounts/...  групп в проекте нет
    *   .../_debug/pmp/uploadfail/...  загрузка картинки завершается ошибкой (status 2)
    *   .../_debug/pmp/slowupload/...  загрузка вечно в работе (проверка таймаута)
    *   .../_debug/pmp/fail2/...       первые 2 запроса /upload/init отдают 503 (ретраи)

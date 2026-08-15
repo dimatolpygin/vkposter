@@ -6,12 +6,12 @@ import { log } from '../logger.js';
 const logger = log('группы');
 
 /**
- * Список групп ВК из postmypost → в БД.
+ * Список групп из postmypost → в БД (ВКонтакте и Одноклассники).
  *
  * Клиент подключает группу в postmypost, а числовые id в панель не вписывает.
  *
- * Фильтр по `chanel_id = 2` (ВК) стоит в клиенте: в проекте могут быть и Telegram,
- * и Instagram, а этот проект — про ВК.
+ * Фильтр по площадке стоит в клиенте (`NETWORKS` в `lib/postmypost.js`): в проекте
+ * могут быть и Telegram, и Instagram, а постим мы во ВКонтакте и Одноклассники.
  *
  * Скрытые группы синхронизация не возвращает: если клиент удалил группу из панели,
  * она не должна всплывать обратно при каждом обновлении списка. Вернуть её можно
@@ -39,7 +39,7 @@ export async function syncGroups() {
 
   logger.info(
     { всего: accounts.length, добавлено: added, обновлено: updated, отвалилось: broken, скрыто: hidden },
-    `Групп ВК в postmypost: ${accounts.length} (новых ${added}, отвалившихся ${broken}` +
+    `Групп в postmypost: ${accounts.length} (новых ${added}, отвалившихся ${broken}` +
       (hidden ? `, скрытых ${hidden}` : '') + ')',
   );
   return { total: accounts.length, added, updated, broken, hidden };
