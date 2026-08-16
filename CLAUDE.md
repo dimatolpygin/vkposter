@@ -1,7 +1,7 @@
 # CLAUDE.md — Автопостинг ВК (обзоры-отзывы)
 
 > **У проекта есть вторая копия — под клиента Комарова.**
-> Папка `D:\claude\zakazi0101010k_soft_postkposter`, репо
+> Папка `D:\claude\zakazi0101010\vk_soft_post\vkposter`, репо
 > `dimatolpygin/vkposter-komarov-`, прод — общий сервер okhost `193.17.95.54`
 > (навык `/okdeploy2`), имя на сервере `komarov-vkposter`, домен `vktop545.com`.
 > Это **отдельный репозиторий**: правки сюда туда сами не уезжают и наоборот.
